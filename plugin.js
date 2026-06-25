@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "1.0.4";
+  const VERSION = "1.0.6";
 
   const DEFAULT_SETTINGS = {
     maxChars: 70,
@@ -161,6 +161,13 @@
     return Math.max(1, cjk + asciiWords + punct);
   }
 
+  function cleanCustomInstruction(text) {
+    return String(text || "")
+      .replace(/\r/g, "")
+      .trim()
+      .slice(0, 1200);
+  }
+
   function localAnalyzeFact(text, settings) {
     const t = String(text || "");
     const len = countChineseChars(t);
@@ -192,7 +199,7 @@
     return { len, timeHits, lowHits, importantHits, flags, recommendation, tokenEstimate: estimateTokens(t) };
   }
 
-  function buildReviewerPrompt(records, settings) {
+  function buildReviewerPrompt(records, settings, customInstruction = "") {
     const today = nowDateText();
     return `你是 Roche 记忆低 Token 清理器。今天是 ${today}。
 
@@ -204,6 +211,13 @@ COMPRESS：有价值但太长、太流水账，需要压缩。
 DELETE：普通、重复、过时、无后续意义，应遗忘。
 
 判断标准：
+${cleanCustomInstruction(customInstruction) ? `
+
+本次用户补充要求：
+${cleanCustomInstruction(customInstruction)}
+
+以上补充要求优先用于判断取舍，但不得违反低 Token 原则；如果补充要求为空，则只按默认规则处理。
+` : ""}
 1. 这条记忆是否造成了 {{char}} 与 {{user}} 之间长期的关系后果？
 2. 它是否影响关系、信任、边界、承诺、冲突、和解、亲密、距离、地点或未来方向？
 3. 它是否是新先例，而不是重复玩笑或普通互动？
@@ -236,8 +250,8 @@ DELETE：普通、重复、过时、无后续意义，应遗忘。
 ${JSON.stringify(records, null, 2)}`;
   }
 
-  async function askAiForReview(roche, records, settings) {
-    const prompt = buildReviewerPrompt(records, settings);
+  async function askAiForReview(roche, records, settings, customInstruction = "") {
+    const prompt = buildReviewerPrompt(records, settings, customInstruction);
     const result = await roche.ai.chat({
       messages: [
         { role: "system", content: "你是 JSON API。只输出有效 JSON 数组，不输出解释、Markdown 或代码块。输出必须以 [ 开头，以 ] 结尾。" },
@@ -257,7 +271,7 @@ ${JSON.stringify(records, null, 2)}`;
       // 有些模型在批量时会返回说明文字或截断 JSON。失败时自动降级为逐条审查，避免整批报错。
       const recovered = [];
       for (const record of records) {
-        const singlePrompt = buildReviewerPrompt([record], settings);
+        const singlePrompt = buildReviewerPrompt([record], settings, customInstruction);
         const single = await roche.ai.chat({
           messages: [
             { role: "system", content: "你是 JSON API。只输出一个 JSON 数组，数组内只有一个对象。不要解释、Markdown 或代码块。" },
@@ -437,6 +451,50 @@ ${JSON.stringify(records, null, 2)}`;
       }
       .roche-plugin-memory-token-cleaner .mtc-settings-grid label { font-size: 13px; opacity: .86; }
       .roche-plugin-memory-token-cleaner .mtc-settings-grid input[type="checkbox"] { width: 22px; height: 22px; }
+      .roche-plugin-memory-token-cleaner textarea {
+        width: 100%;
+        min-height: 96px;
+        resize: vertical;
+        border-radius: 12px;
+        border: 1px solid var(--mtc-border-color, rgba(31,35,40,.13));
+        background: var(--mtc-card-bg, #fff);
+        color: var(--mtc-text, #1f2328);
+        padding: 10px 12px;
+        font-size: 14px;
+        line-height: 1.5;
+        font-family: inherit;
+        box-sizing: border-box;
+      }
+      .roche-plugin-memory-token-cleaner textarea::placeholder {
+        color: rgba(31,35,40,.38);
+      }
+      @media (prefers-color-scheme: dark) {
+        .roche-plugin-memory-token-cleaner textarea::placeholder {
+          color: rgba(244,246,248,.38);
+        }
+      }
+      .roche-plugin-memory-token-cleaner .mtc-switch-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--mtc-border-color, rgba(31,35,40,.13));
+      }
+      .roche-plugin-memory-token-cleaner .mtc-switch-row:last-child {
+        border-bottom: none;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-switch-row input[type="checkbox"] {
+        width: 22px !important;
+        height: 22px !important;
+        accent-color: #6f8cff;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-field-note {
+        font-size: 12px;
+        line-height: 1.45;
+        color: var(--mtc-muted-color, rgba(31,35,40,.62));
+        margin-top: 6px;
+      }
       .roche-plugin-memory-token-cleaner .mtc-hidden { display: none !important; }
       .roche-plugin-memory-token-cleaner .mtc-log {
         max-height: 160px; overflow: auto; font-size: 12px; line-height: 1.4;
@@ -446,6 +504,82 @@ ${JSON.stringify(records, null, 2)}`;
         height: calc(80px + env(safe-area-inset-bottom, 0px));
         flex: 0 0 auto;
       }
+      .roche-plugin-memory-token-cleaner {
+        --mtc-bg: #ffffff;
+        --mtc-text: #1f2328;
+        --mtc-muted-color: rgba(31,35,40,.62);
+        --mtc-card-bg: #ffffff;
+        --mtc-soft-bg: #f1f3f5;
+        --mtc-border-color: rgba(31,35,40,.13);
+        --mtc-top-bg: rgba(255,255,255,.96);
+        --mtc-primary-bg: #dfe8ff;
+        --mtc-primary-border: #b7c7ff;
+        --mtc-danger-bg: #ffe5e5;
+        --mtc-danger-border: #ffc1c1;
+        background: var(--mtc-bg);
+        color: var(--mtc-text);
+      }
+      @media (prefers-color-scheme: dark) {
+        .roche-plugin-memory-token-cleaner {
+          --mtc-bg: #111216;
+          --mtc-text: #f4f6f8;
+          --mtc-muted-color: rgba(244,246,248,.68);
+          --mtc-card-bg: rgba(255,255,255,.07);
+          --mtc-soft-bg: rgba(255,255,255,.10);
+          --mtc-border-color: rgba(255,255,255,.14);
+          --mtc-top-bg: rgba(17,18,22,.96);
+          --mtc-primary-bg: rgba(100,145,255,.28);
+          --mtc-primary-border: rgba(140,170,255,.50);
+          --mtc-danger-bg: rgba(255,90,90,.18);
+          --mtc-danger-border: rgba(255,120,120,.42);
+        }
+      }
+      .roche-plugin-memory-token-cleaner .mtc-top {
+        background: var(--mtc-top-bg) !important;
+        color: var(--mtc-text) !important;
+        border-bottom: 1px solid var(--mtc-border-color);
+      }
+      .roche-plugin-memory-token-cleaner .mtc-title {
+        color: var(--mtc-text) !important;
+        opacity: 1 !important;
+      }
+      .roche-plugin-memory-token-cleaner button,
+      .roche-plugin-memory-token-cleaner select,
+      .roche-plugin-memory-token-cleaner input {
+        background: var(--mtc-card-bg) !important;
+        color: var(--mtc-text) !important;
+        border-color: var(--mtc-border-color) !important;
+      }
+      .roche-plugin-memory-token-cleaner button.primary {
+        background: var(--mtc-primary-bg) !important;
+        border-color: var(--mtc-primary-border) !important;
+      }
+      .roche-plugin-memory-token-cleaner button.danger {
+        background: var(--mtc-danger-bg) !important;
+        border-color: var(--mtc-danger-border) !important;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-card,
+      .roche-plugin-memory-token-cleaner .mtc-fact {
+        background: var(--mtc-card-bg) !important;
+        border-color: var(--mtc-border-color) !important;
+        color: var(--mtc-text) !important;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-stat,
+      .roche-plugin-memory-token-cleaner .mtc-badge,
+      .roche-plugin-memory-token-cleaner .mtc-log {
+        background: var(--mtc-soft-bg) !important;
+        border-color: var(--mtc-border-color) !important;
+        color: var(--mtc-text) !important;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-muted {
+        color: var(--mtc-muted-color) !important;
+        opacity: 1 !important;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-proposal {
+        background: color-mix(in srgb, var(--mtc-primary-bg) 45%, transparent) !important;
+        border-color: var(--mtc-primary-border) !important;
+      }
+
     `;
     return style;
   }
@@ -473,6 +607,7 @@ ${JSON.stringify(records, null, 2)}`;
             vectors: [],
             proposals: new Map(),
             selected: new Set(),
+            customInstruction: "",
             busy: false
           };
 
@@ -664,6 +799,7 @@ ${JSON.stringify(records, null, 2)}`;
               roche.ui.toast("没有需要审查的记忆。");
               return;
             }
+            state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
             setBusy(true);
             try {
               let count = 0;
@@ -676,7 +812,7 @@ ${JSON.stringify(records, null, 2)}`;
                   localRecommendation: r.analysis.recommendation
                 }));
                 log(`AI审查第 ${Math.floor(i / state.settings.batchSize) + 1} 批，共 ${records.length} 条。`);
-                const raw = await askAiForReview(roche, records, state.settings);
+                const raw = await askAiForReview(roche, records, state.settings, state.customInstruction);
                 const factMap = new Map(currentFactsWithAnalysis().map(r => [r.id, r]));
                 raw.map(p => normalizeProposal(p, factMap, state.settings)).forEach(p => {
                   state.proposals.set(p.id, p);
@@ -879,6 +1015,12 @@ ${JSON.stringify(records, null, 2)}`;
               </div>
 
               <div class="mtc-card">
+                <div style="font-weight:700; margin-bottom:8px">本次 AI 审查补充要求</div>
+                <textarea id="mtc-custom-instruction" placeholder="可选，不填也可以。这里可以临时提醒 AI：例如“不要删除香港/伦敦地点”“保留承诺和边界”“这段时间线很重要，只压缩不要删除”“注意区分 Price 和 Ghost”“不要把调情全删掉，保留第一次形成边界的事件”。这些灰字只是示例，不会自动植入。">${escapeHtml(state.customInstruction || "")}</textarea>
+                <div class="mtc-field-note">这段只会在你点击“AI审查疑似记忆/压缩过长”时发送给 AI，用来影响本次判断；不会写进 Roche 记忆。</div>
+              </div>
+
+              <div class="mtc-card">
                 <div class="mtc-row">
                   <button id="mtc-ai-review" class="primary" ${disabled}>AI审查疑似记忆</button>
                   <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
@@ -901,12 +1043,19 @@ ${JSON.stringify(records, null, 2)}`;
                   <label>关键词数量上限</label><input id="mtc-keyword-limit" type="number" value="${state.settings.keywordLimit}">
                   <label>AI批量审查条数</label><input id="mtc-batch-size" type="number" value="${state.settings.batchSize}">
                   <label>读取长期记忆上限</label><input id="mtc-long-limit" type="number" value="${state.settings.longTermLimit}">
-                  <label>关键词写回主记忆</label><input id="mtc-write-keywords" type="checkbox" ${state.settings.writeKeywords ? "checked" : ""}>
-                  <label>严格低Token模式</label><input id="mtc-strict" type="checkbox" ${state.settings.strictMode ? "checked" : ""}>
-                  <label>压缩建议可自动应用</label><input id="mtc-auto-compress" type="checkbox" ${state.settings.autoApplyCompress ? "checked" : ""}>
-                  <label>显示Core Memory</label><input id="mtc-show-core" type="checkbox" ${state.settings.showCore ? "checked" : ""}>
-                  <label>显示向量区</label><input id="mtc-show-vectors" type="checkbox" ${state.settings.showVectors ? "checked" : ""}>
                 </div>
+
+                <details style="margin-top:12px">
+                  <summary>高级开关</summary>
+                  <div style="margin-top:8px">
+                    <label class="mtc-switch-row"><span>关键词写回主记忆</span><input id="mtc-write-keywords" type="checkbox" ${state.settings.writeKeywords ? "checked" : ""}></label>
+                    <label class="mtc-switch-row"><span>严格低Token模式</span><input id="mtc-strict" type="checkbox" ${state.settings.strictMode ? "checked" : ""}></label>
+                    <label class="mtc-switch-row"><span>压缩建议可自动应用</span><input id="mtc-auto-compress" type="checkbox" ${state.settings.autoApplyCompress ? "checked" : ""}></label>
+                    <label class="mtc-switch-row"><span>显示Core Memory</span><input id="mtc-show-core" type="checkbox" ${state.settings.showCore ? "checked" : ""}></label>
+                    <label class="mtc-switch-row"><span>显示向量区</span><input id="mtc-show-vectors" type="checkbox" ${state.settings.showVectors ? "checked" : ""}></label>
+                  </div>
+                </details>
+
                 <div style="margin-top:10px"><button id="mtc-save-settings" ${disabled}>保存设置</button></div>
               </details>
 
@@ -1005,6 +1154,9 @@ ${JSON.stringify(records, null, 2)}`;
               state.proposals.clear();
               state.selected.clear();
               render();
+            });
+            root.querySelector("#mtc-custom-instruction")?.addEventListener("input", e => {
+              state.customInstruction = e.target.value;
             });
             root.querySelector("#mtc-ai-review")?.addEventListener("click", reviewWithAi);
             root.querySelector("#mtc-quick-compress")?.addEventListener("click", quickCompressFlagged);
