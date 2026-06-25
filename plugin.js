@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.0.0";
+  const VERSION = "2.2.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -16,7 +16,8 @@
     writeKeywords: true,
     autoApplySafeCompress: false,
     showCore: false,
-    showVectors: true
+    showVectors: true,
+    executeAllAiSuggestions: false
   };
 
   const IMPORTANT_HINTS = [
@@ -215,13 +216,19 @@
     if (timeHits >= 2 || timelineWords >= 3) flags.push("像流水账");
     if (sentenceCount >= 3) flags.push("多事件");
     if (lowHits >= 2 && importantHits === 0) flags.push("低价值倾向");
-    if (!hasHash && settings.writeKeywords) flags.push("无关键词");
+    const keywordMissing = !hasHash && settings.writeKeywords;
+
+    const priority =
+      len > settings.maxChars ||
+      flags.includes("像流水账") ||
+      flags.includes("多事件") ||
+      flags.includes("低价值倾向");
 
     let recommendation = "KEEP";
     if (flags.includes("低价值倾向") && importantHits === 0) recommendation = "DELETE";
-    else if (flags.length) recommendation = "COMPRESS";
+    else if (priority) recommendation = "COMPRESS";
 
-    return { len, flags, recommendation, tokenEstimate: estimateTokens(t), lowHits, importantHits };
+    return { len, flags, recommendation, priority, tokenEstimate: estimateTokens(t), lowHits, importantHits, keywordMissing };
   }
 
   function isImportantText(text) {
@@ -407,9 +414,24 @@ ${JSON.stringify(records, null, 2)}`;
     const reason = String(p?.reason || "").trim().slice(0, 40);
     const original = factMap.get(id)?.text || "";
 
+    let needsManual = false;
+    const manualReasons = [];
+
     if (action === "COMPRESS") {
-      if (!newText) newText = simpleCompressText(original, settings);
+      if (!newText) {
+        newText = simpleCompressText(original, settings);
+        needsManual = true;
+        manualReasons.push("AI未给压缩文本");
+      }
       if (charLen(newText) > settings.majorMax) newText = [...newText].slice(0, settings.majorMax).join("");
+      if (charLen(newText) < 20 && charLen(original) > 80) {
+        needsManual = true;
+        manualReasons.push("压缩过短");
+      }
+      if (charLen(newText) >= charLen(original)) {
+        needsManual = true;
+        manualReasons.push("未有效压缩");
+      }
     }
 
     if (action === "SPLIT") {
@@ -420,15 +442,27 @@ ${JSON.stringify(records, null, 2)}`;
       if (newItems.length < 2) {
         action = "COMPRESS";
         newText = newText || simpleCompressText(original, settings);
+        needsManual = true;
+        manualReasons.push("拆分失败");
       }
     }
 
-    let risk = String(p?.risk || "").toLowerCase();
-    if (!["safe","confirm"].includes(risk)) risk = "safe";
-    if (action === "SPLIT") risk = "confirm";
-    if (action === "DELETE" && isImportantText(original)) risk = "confirm";
+    if (action === "DELETE" && isImportantText(original)) {
+      // 不再强制阻塞，只标记为需处理；用户可在“全部执行AI建议”模式下照样一键执行。
+      needsManual = true;
+      manualReasons.push("重要内容删除");
+    }
 
-    return { id, action, newText, newItems, keywords, reason, risk };
+    let risk = String(p?.risk || "").toLowerCase();
+    if (!["safe","confirm"].includes(risk)) risk = needsManual ? "confirm" : "safe";
+    if (needsManual) risk = "confirm";
+
+    return {
+      id, action, newText, newItems, keywords,
+      reason: manualReasons[0] || reason,
+      risk,
+      needsManual
+    };
   }
 
   async function loadSettings(roche) {
@@ -512,6 +546,12 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner .mtc-badge.confirm { background:rgba(180,120,255,.14); border-color:rgba(180,120,255,.35); }
       .roche-plugin-memory-token-cleaner .mtc-text { white-space:pre-wrap; line-height:1.5; font-size:13px; word-break:break-word; }
       .roche-plugin-memory-token-cleaner .mtc-proposal { margin-top:8px; padding:8px; border-radius:10px; background:rgba(90,140,255,.10); border:1px solid var(--mtc-primary-border); }
+      .roche-plugin-memory-token-cleaner .mtc-edit-text {
+        width:100%; min-height:86px; margin-top:6px; font-size:13px; line-height:1.5;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-mini-title {
+        font-weight:700; margin:10px 0 6px;
+      }
       .roche-plugin-memory-token-cleaner .mtc-settings-grid { display:grid; grid-template-columns:1fr 90px; gap:8px; align-items:center; }
       .roche-plugin-memory-token-cleaner .mtc-switch-button {
         width:100%; display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; text-align:left;
@@ -566,6 +606,7 @@ ${JSON.stringify(records, null, 2)}`;
           vectors: [],
           proposals: new Map(),
           selected: new Set(),
+          verified: new Set(),
           customInstruction: "",
           reviewMode: "review",
           showCustomInstruction: false,
@@ -618,10 +659,13 @@ ${JSON.stringify(records, null, 2)}`;
         function stats() {
           const rows = currentRows();
           const totalTokens = rows.reduce((sum, r) => sum + r.analysis.tokenEstimate, 0);
-          const flagged = rows.filter(r => r.analysis.flags.length || r.analysis.recommendation !== "KEEP").length;
-          const safe = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP" && p.risk !== "confirm").length;
-          const confirm = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP" && p.risk === "confirm").length;
-          return { rows, totalTokens, flagged, safe, confirm };
+          const priority = rows.filter(r => r.analysis.priority && !state.proposals.has(r.id) && !state.verified.has(r.id)).length;
+          const proposals = Array.from(state.proposals.values());
+          const actionable = proposals.filter(p => p.action !== "KEEP").length;
+          const needsManual = proposals.filter(p => p.needsManual).length;
+          const keep = proposals.filter(p => p.action === "KEEP").length;
+          const totalProposals = proposals.length;
+          return { rows, totalTokens, flagged: priority, priority, safe: actionable, confirm: needsManual, keep, totalProposals };
         }
 
         async function loadConversations() {
@@ -681,6 +725,7 @@ ${JSON.stringify(records, null, 2)}`;
             state.vectors = Array.isArray(memory?.vectors) ? memory.vectors : [];
             state.proposals.clear();
             state.selected.clear();
+            state.verified.clear();
             log(`已读取长期记忆：facts ${state.facts.length}，vectors ${state.vectors.length}。`);
           } catch (err) {
             roche.ui.toast("读取记忆失败：" + (err?.message || err));
@@ -693,7 +738,7 @@ ${JSON.stringify(records, null, 2)}`;
         function selectedOrFlaggedRows() {
           const rows = currentRows();
           if (state.selected.size) return rows.filter(r => state.selected.has(r.id));
-          return rows.filter(r => r.analysis.flags.length || r.analysis.recommendation !== "KEEP");
+          return rows.filter(r => r.analysis.priority && !state.verified.has(r.id));
         }
 
         async function reviewWithAi() {
@@ -722,9 +767,10 @@ ${JSON.stringify(records, null, 2)}`;
                 count++;
               });
             }
+            state.showConfirmPanel = true;
             const st = stats();
-            roche.ui.toast(`审查完成：安全建议 ${st.safe}，待确认 ${st.confirm}。`);
-            log(`审查完成：${count} 条建议。安全 ${st.safe}，待确认 ${st.confirm}。`);
+            roche.ui.toast(`审查完成：AI建议 ${st.safe}，需处理 ${st.confirm}，建议保留 ${st.keep}。`);
+            log(`审查完成：${count} 条建议。AI建议 ${st.safe}，需处理 ${st.confirm}，建议保留 ${st.keep}。`);
           } catch (err) {
             roche.ui.toast("AI审查失败：" + (err?.message || err));
             log("AI审查失败：" + (err?.message || err));
@@ -806,15 +852,60 @@ ${JSON.stringify(records, null, 2)}`;
           return "skip";
         }
 
-        async function applySafeProposals() {
-          const proposals = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP" && p.risk !== "confirm");
-          if (!proposals.length) {
-            roche.ui.toast("没有安全建议可应用。");
+        function applyProposalToLocalState(p) {
+          if (!p) return;
+          if (p.action === "DELETE") {
+            state.facts = state.facts.filter(item => getMemoryId(item) !== p.id);
+            state.proposals.delete(p.id);
+            state.selected.delete(p.id);
             return;
           }
+
+          if (p.action === "COMPRESS") {
+            const text = finalMemoryText(p.newText, p.keywords, state.settings);
+            const item = state.facts.find(x => getMemoryId(x) === p.id);
+            if (item && text) {
+              item.summaryText = text;
+              item.action = text;
+              item.text = text;
+              item.content = text;
+            }
+            state.proposals.delete(p.id);
+            state.selected.delete(p.id);
+            return;
+          }
+
+          if (p.action === "SPLIT") {
+            state.proposals.delete(p.id);
+            state.selected.delete(p.id);
+          }
+        }
+
+        async function applySafeProposals() {
+          const all = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP");
+          if (!all.length) {
+            roche.ui.toast("没有 AI 建议可清理。");
+            return;
+          }
+
+          const blocked = state.settings.executeAllAiSuggestions ? [] : all.filter(p => p.needsManual);
+          const proposals = state.settings.executeAllAiSuggestions ? all : all.filter(p => !p.needsManual);
+
+          if (!proposals.length) {
+            roche.ui.toast("只有需处理项。请查看/编辑结果，或在高级设置打开“全部执行AI建议”。");
+            state.showConfirmPanel = true;
+            render();
+            return;
+          }
+
+          let message = `将应用 ${proposals.length} 条 AI 建议`;
+          if (blocked.length) message += `，并暂不处理 ${blocked.length} 条需处理项`;
+          if (state.settings.executeAllAiSuggestions) message += "，包括拆分和删除";
+          message += "。确定继续吗？";
+
           const ok = await roche.ui.confirm({
-            title: "应用安全建议",
-            message: `将应用 ${proposals.length} 条低风险建议。高风险拆分/删除不会自动应用。确定继续吗？`
+            title: state.settings.executeAllAiSuggestions ? "全部执行AI建议" : "清理",
+            message
           });
           if (!ok) return;
 
@@ -828,19 +919,85 @@ ${JSON.stringify(records, null, 2)}`;
               else if (r.startsWith("split")) done.split++;
               else done.skip++;
             }
+            for (const p of proposals) applyProposalToLocalState(p);
+
+            // 全部执行模式下，KEEP 项也自动确认，不再留给用户看。
+            if (state.settings.executeAllAiSuggestions) {
+              Array.from(state.proposals.values()).filter(p => p.action === "KEEP").forEach(p => {
+                state.verified.add(p.id);
+                state.proposals.delete(p.id);
+              });
+            }
+
             roche.ui.toast(`完成：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}。`);
-            log(`已应用安全建议：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}，跳过 ${done.skip}。`);
-            await loadMemory();
+            log(`已清理：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}，跳过 ${done.skip}。${blocked.length ? ` 保留需处理 ${blocked.length} 条。` : ""}`);
+            render();
           } catch (err) {
-            roche.ui.toast("应用失败：" + (err?.message || err));
-            log("应用失败：" + (err?.message || err));
+            roche.ui.toast("清理失败：" + (err?.message || err));
+            log("清理失败：" + (err?.message || err));
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        function syncEditedProposal(id) {
+          const p = state.proposals.get(id);
+          if (!p) return p;
+          const text = root.querySelector(`.mtc-edit-text[data-id="${CSS.escape(id)}"]`)?.value;
+          if (typeof text !== "string") return p;
+
+          if (p.action === "COMPRESS") {
+            let cleaned = text.trim();
+            // 如果用户把关键词也留在正文里，直接按最终文本写入，不再重复追加关键词。
+            p.newText = cleaned;
+            p.keywords = [];
+          }
+
+          if (p.action === "SPLIT") {
+            const parts = text.split(/\n---\n/g).map(x => x.trim()).filter(Boolean);
+            if (parts.length >= 2) {
+              p.newItems = parts;
+              p.keywords = [];
+            } else {
+              p.action = "COMPRESS";
+              p.newText = text.trim();
+              p.newItems = [];
+              p.keywords = [];
+            }
+          }
+
+          p.needsManual = false;
+          p.risk = "safe";
+          state.proposals.set(id, p);
+          return p;
+        }
+
+        async function rerunOneAi(id) {
+          const row = currentRows().find(r => r.id === id);
+          if (!row) return;
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
+          setBusy(true);
+          try {
+            const raw = await askAiForReview(roche, [{
+              id: row.id,
+              text: row.text,
+              localFlags: row.analysis.flags,
+              localRecommendation: row.analysis.recommendation
+            }], state.settings, state.customInstruction, state.reviewMode);
+            const factMap = new Map(currentRows().map(r => [r.id, r]));
+            const p = normalizeProposal(raw[0] || { id, action:"KEEP" }, factMap, state.settings, state.reviewMode);
+            state.proposals.set(id, p);
+            state.showConfirmPanel = true;
+            roche.ui.toast("已重新生成。");
+          } catch (err) {
+            roche.ui.toast("重改失败：" + (err?.message || err));
           } finally {
             setBusy(false);
           }
         }
 
         async function applyConfirmProposal(id) {
-          const p = state.proposals.get(id);
+          const p = syncEditedProposal(id);
           if (!p) return;
           const ok = await roche.ui.confirm({
             title: "应用待确认建议",
@@ -861,6 +1018,7 @@ ${JSON.stringify(records, null, 2)}`;
 
         function keepProposal(id) {
           state.proposals.delete(id);
+          state.verified.add(id);
           render();
         }
 
@@ -1000,28 +1158,61 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         function renderConfirmPanel() {
-          const items = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP" && p.risk === "confirm");
-          if (!state.showConfirmPanel || !items.length) return "";
+          const all = Array.from(state.proposals.values());
+          if (!state.showConfirmPanel || !all.length) return "";
           const factMap = new Map(currentRows().map(r => [r.id, r]));
-          return `
-            <div class="mtc-card">
-              <div style="font-weight:700;margin-bottom:8px">待人工确认 ${items.length} 条</div>
+
+          const group = (title, items) => {
+            if (!items.length) return "";
+            return `
+              <div class="mtc-mini-title">${escapeHtml(title)} ${items.length} 条</div>
               ${items.map(p => {
                 const original = factMap.get(p.id)?.text || "";
+                const isKeep = p.action === "KEEP";
+                const editValue =
+                  p.action === "COMPRESS" ? finalMemoryText(p.newText, p.keywords, state.settings) :
+                  p.action === "SPLIT" ? (p.newItems || []).map(x => finalMemoryText(x, p.keywords, state.settings)).join("\\n---\\n") :
+                  "";
+
                 return `
                   <div class="mtc-fact">
-                    <div class="mtc-badges">${proposalBadge(p)} ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}</div>
-                    <div class="mtc-muted" style="margin-top:8px">原记忆</div>
-                    <div class="mtc-text">${escapeHtml(original)}</div>
-                    <div class="mtc-muted" style="margin-top:8px">建议</div>
-                    ${renderProposal(p)}
+                    <div class="mtc-badges">
+                      ${proposalBadge(p)}
+                      ${isKeep ? `<span class="mtc-badge">KEEP</span>` : ""}
+                      ${p.needsManual ? `<span class="mtc-badge confirm">需处理</span>` : ""}
+                      ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
+                    </div>
+                    <details>
+                      <summary class="mtc-muted" style="margin-top:8px">原记忆</summary>
+                      <div class="mtc-text">${escapeHtml(original)}</div>
+                    </details>
+                    ${!isKeep && p.action !== "DELETE" ? `
+                      <div class="mtc-muted" style="margin-top:8px">AI改后，可直接手动编辑</div>
+                      <textarea class="mtc-edit-text" data-id="${escapeHtml(p.id)}">${escapeHtml(editValue)}</textarea>
+                    ` : ""}
+                    ${p.action === "DELETE" ? `<div class="mtc-proposal"><div class="mtc-text">AI 建议删除这条记忆。</div></div>` : ""}
                     <div class="mtc-row" style="margin-top:8px">
-                      <button class="primary mtc-apply-confirm" data-id="${escapeHtml(p.id)}">应用</button>
-                      <button class="mtc-keep-proposal" data-id="${escapeHtml(p.id)}">保留原文</button>
+                      ${!isKeep ? `<button class="primary mtc-apply-confirm" data-id="${escapeHtml(p.id)}">应用这条</button>` : ""}
+                      ${!isKeep ? `<button class="mtc-rerun-ai" data-id="${escapeHtml(p.id)}">让AI重改</button>` : ""}
+                      <button class="mtc-keep-proposal" data-id="${escapeHtml(p.id)}">${isKeep ? "确认保留" : "保留原文"}</button>
                     </div>
                   </div>
                 `;
               }).join("")}
+            `;
+          };
+
+          const needs = all.filter(p => p.action !== "KEEP" && p.needsManual);
+          const changed = all.filter(p => p.action !== "KEEP" && !p.needsManual);
+          const keep = all.filter(p => p.action === "KEEP");
+
+          return `
+            <div class="mtc-card">
+              <div style="font-weight:700;margin-bottom:8px">查看/编辑结果</div>
+              <div class="mtc-muted">这里不是强制人工审。你可以直接点“清理”，也可以只编辑不满意的 AI 改后内容，或让 AI 重改单条。</div>
+              ${group("需处理", needs)}
+              ${group("AI已修改", changed)}
+              ${group("建议保留", keep)}
             </div>
           `;
         }
@@ -1039,7 +1230,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button id="mtc-back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2</div>
+              <div class="mtc-title">记忆低Token清理器 v2.2</div>
             </div>
 
             <div class="mtc-card">
@@ -1059,10 +1250,12 @@ ${JSON.stringify(records, null, 2)}`;
               <div class="mtc-stats">
                 <div class="mtc-stat"><b>${state.facts.length}</b><span>事实记忆</span></div>
                 <div class="mtc-stat"><b>${state.vectors.length}</b><span>向量记忆</span></div>
-                <div class="mtc-stat"><b>${s.flagged}</b><span>疑似需处理</span></div>
+                <div class="mtc-stat"><b>${s.priority}</b><span>优先清理</span></div>
                 <div class="mtc-stat"><b>${s.totalTokens}</b><span>事实估算token</span></div>
-                <div class="mtc-stat"><b>${s.safe}</b><span>安全建议</span></div>
-                <div class="mtc-stat"><b>${s.confirm}</b><span>待确认</span></div>
+                <div class="mtc-stat"><b>${s.safe}</b><span>AI建议</span></div>
+                <div class="mtc-stat"><b>${s.confirm}</b><span>需处理</span></div>
+                <div class="mtc-stat"><b>${s.keep}</b><span>建议保留</span></div>
+                <div class="mtc-stat"><b>${s.totalProposals}</b><span>审查结果</span></div>
               </div>
             </div>
 
@@ -1070,8 +1263,8 @@ ${JSON.stringify(records, null, 2)}`;
               <div class="mtc-row">
                 <button id="mtc-ai-review" class="primary" ${disabled}>AI审查疑似记忆</button>
                 <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
-                <button id="mtc-apply-safe" class="primary" ${disabled}>应用安全建议${s.safe ? `(${s.safe})` : ""}</button>
-                <button id="mtc-toggle-confirm" ${disabled}>待确认${s.confirm ? `(${s.confirm})` : ""}</button>
+                <button id="mtc-apply-safe" class="primary" ${disabled}>清理${s.safe ? `(${s.safe})` : ""}</button>
+                <button id="mtc-toggle-confirm" ${disabled}>审查结果${s.totalProposals ? `(${s.totalProposals})` : ""}</button>
                 <button id="mtc-toggle-custom-instruction" class="success" ${disabled}>审查补充要求</button>
                 <button id="mtc-delete-selected" class="danger" ${disabled}>删除勾选</button>
                 <button id="mtc-scroll-top" ${disabled}>回到顶部</button>
@@ -1082,7 +1275,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <textarea id="mtc-custom-instruction" placeholder="例：保留地点；注意时间顺序；只压缩不删除；保留未完成承诺。">${escapeHtml(state.customInstruction || "")}</textarea>
                 <div class="mtc-field-note">仅影响本次 AI 审查。</div>
               </div>
-              <div class="mtc-muted" style="margin-top:8px">建议：Roche“最新事实注入上限”设为 3～5。安全建议可批量应用，高风险拆分/删除会进入待确认。</div>
+              <div class="mtc-muted" style="margin-top:8px">建议：Roche“最新事实注入上限”设为 3～5。点“清理”会应用 AI 建议；开启“全部执行AI建议”后不会拦截需处理项。</div>
             </div>
 
             ${renderConfirmPanel()}
@@ -1102,6 +1295,7 @@ ${JSON.stringify(records, null, 2)}`;
               <details style="margin-top:12px">
                 <summary>高级开关</summary>
                 <div style="margin-top:8px">
+                  ${renderSwitchRow("executeAllAiSuggestions", "全部执行AI建议", state.settings.executeAllAiSuggestions)}
                   ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
                   ${renderSwitchRow("autoApplySafeCompress", "压缩建议可自动应用", state.settings.autoApplySafeCompress)}
                   ${renderSwitchRow("showCore", "显示Core Memory", state.settings.showCore)}
@@ -1155,12 +1349,12 @@ ${JSON.stringify(records, null, 2)}`;
             const manual = String(root.querySelector("#mtc-manual-conversation-id")?.value || "").trim();
             if (!manual) return roche.ui.toast("请先粘贴 conversationId。");
             state.conversationId = manual;
-            state.facts = []; state.vectors = []; state.core = null; state.proposals.clear(); state.selected.clear();
+            state.facts = []; state.vectors = []; state.core = null; state.proposals.clear(); state.selected.clear(); state.verified.clear();
             render();
           });
           root.querySelector("#mtc-conversation")?.addEventListener("change", e => {
             state.conversationId = e.target.value;
-            state.facts = []; state.vectors = []; state.core = null; state.proposals.clear(); state.selected.clear();
+            state.facts = []; state.vectors = []; state.core = null; state.proposals.clear(); state.selected.clear(); state.verified.clear();
             render();
           });
           root.querySelector("#mtc-custom-instruction")?.addEventListener("input", e => state.customInstruction = e.target.value);
@@ -1181,7 +1375,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.querySelector("#mtc-delete-vectors")?.addEventListener("click", tryDeleteVectors);
           root.querySelector("#mtc-select-flagged")?.addEventListener("click", () => {
             currentRows().forEach(r => {
-              if (r.analysis.flags.length || r.analysis.recommendation !== "KEEP") state.selected.add(r.id);
+              if (r.analysis.priority) state.selected.add(r.id);
             });
             render();
           });
@@ -1202,6 +1396,7 @@ ${JSON.stringify(records, null, 2)}`;
             if (pill) pill.textContent = value ? "开" : "关";
           }));
           root.querySelectorAll(".mtc-apply-confirm").forEach(btn => btn.addEventListener("click", () => applyConfirmProposal(btn.dataset.id)));
+          root.querySelectorAll(".mtc-rerun-ai").forEach(btn => btn.addEventListener("click", () => rerunOneAi(btn.dataset.id)));
           root.querySelectorAll(".mtc-keep-proposal").forEach(btn => btn.addEventListener("click", () => keepProposal(btn.dataset.id)));
         }
 
