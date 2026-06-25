@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "清理、压缩并关键词化 Roche 事实记忆，降低长期记忆注入 token。Core Memory 不会被修改。",
   "author": "Ranni & ChatGPT",
-  "entry": "https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/plugin.js",
+  "entry": "https://raw.githubusercontent.com/EZIO9103/roche-memory-token-cleaner/refs/heads/main/plugin.js",
   "hash": "",
   "permissions": [
     "memory:read",
