@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.3.0";
+  const VERSION = "3.4.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -55,7 +55,15 @@
   }
 
   function getFactText(item) {
-    return String(item?.what || item?.summaryText || item?.action || item?.text || item?.content || "").trim();
+    const pluginish = String(item?.source || "").includes("plugin_memory_token_cleaner");
+    const fields = pluginish
+      ? [item?.summaryText, item?.action, item?.text, item?.content, item?.what]
+      : [item?.what, item?.summaryText, item?.action, item?.text, item?.content];
+    for (const value of fields) {
+      const s = String(value || "").trim();
+      if (s) return s;
+    }
+    return "";
   }
 
   function getFactWho(item) {
@@ -80,6 +88,10 @@
       if (s) return s;
     }
     return "";
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   function estimateTokens(text) {
@@ -511,11 +523,12 @@ SPLIT 拆分规则：
 
 MERGE 合并规则：
 1. MERGE_REPLACE 用于把多条事实记忆合并成一条完整事实，并删除碎片记忆。
-2. 允许跨天合并，但只允许合并同一条已经闭环的事件线，例如同一冲突、同一承诺、同一行程、同一关系节点或同一未完成问题的连续推进。
-3. 不要按日期合并。不要因为同一天或时间接近就合并主题不同的记忆。
-4. 合并后不能丢失关键边界、承诺、关系后果、地点、关键物品或关键称呼。
-5. 如果其中任何一条未来可能需要单独召回，优先分别 COMPRESS，不要 MERGE_REPLACE。
-6. MERGE_REPLACE 的 when 写事件线起点到闭环点，例如 2026-06-20 -> 2026-06-23；排序会按结束时间处理。
+2. MERGE_REPLACE 优先级高于 SPLIT。如果几条事实属于同一事件线的开始、发展、结果，不要拆分成更多事实，应合并成一条闭环事实。
+3. 允许跨天合并，但只允许合并同一条已经闭环的事件线，例如同一冲突、同一承诺、同一行程、同一关系节点或同一未完成问题的连续推进。
+4. 不要按日期合并。不要因为同一天或时间接近就合并主题不同的记忆。
+5. 合并后不能丢失关键边界、承诺、关系后果、地点、关键物品或关键称呼。
+6. 如果其中任何一条未来可能需要单独召回，优先分别 COMPRESS，不要 MERGE_REPLACE。
+7. MERGE_REPLACE 的 when 写事件线起点到闭环点，例如 2026-06-20 -> 2026-06-23；排序会按结束时间处理。
 
 关键词规则：
 1. 每条新记忆的关键词只允许来自该条内容。
@@ -603,6 +616,58 @@ when 绝对不能出现上午、下午、上旬、中旬、下旬、那段时间
 
 原记忆：
 ${JSON.stringify(record, null, 2)}`;
+  }
+
+  function buildTightenPrompt(record, settings, customInstruction = "") {
+    const extra = cleanCustomInstruction(customInstruction);
+    return `请只把当前结果进一步压短，不要重新判断动作，不要拆分，不要删除，不要改成归档。
+
+压缩目标：
+1. 保留事件线、关系后果、边界、承诺、地点、关键物品和关键称呼。
+2. 删除重复铺垫、解释性语句、情绪修饰、分钟级时间、弱细节。
+3. 普通事实目标 70-120 中文字；重大关系节点最多 160 中文字。
+4. 不要添加原文没有的信息。
+5. 输出仍然是一条事实记忆，不要写成总结标题或人设归纳。
+
+when 规则：
+1. when 是机器排序字段，只能输出数字日期或数字日期范围。
+2. when 允许格式：2026-06-20、2026-06-20 22:14、2026-06-20 -> 2026-06-23、2026-06。
+3. when 绝对不能出现上午、下午、上旬、中旬、下旬、那段时间、离港前后等模糊词。模糊词只能写进正文。
+4. 无法确定数字日期时，when 留空。
+
+${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
+
+只返回严格 JSON 对象：
+{
+  "items": [
+    {
+      "text": "压短后的事实记忆",
+      "keywords": ["具体关键词1","具体关键词2"],
+      "who": "可选，人物",
+      "when": "可选，只能数字日期或数字日期范围",
+      "where": "可选，地点",
+      "how": "可选，方式/状态"
+    }
+  ]
+}
+
+当前结果：
+${JSON.stringify(record, null, 2)}`;
+  }
+
+  async function askAiToTighten(roche, record, settings, customInstruction = "") {
+    const parsed = await askAi(roche, buildTightenPrompt(record, settings, customInstruction));
+    const item = parsed?.[0] || {};
+    const text = String(item?.text || item?.newText || item?.content || "").trim();
+    if (!text) return null;
+    return {
+      text,
+      keywords: unique(item?.keywords || extractKeywordsFromText(text, settings.keywordLimit)).slice(0, settings.keywordLimit),
+      who: String(item?.who || "").trim(),
+      when: sanitizeWhen(item?.when || ""),
+      where: String(item?.where || "").trim(),
+      how: String(item?.how || "").trim()
+    };
   }
 
   function buildArchivePrompt(records, settings, customInstruction = "") {
@@ -1099,12 +1164,15 @@ ${JSON.stringify(records, null, 2)}`;
           }
         }
 
-        async function loadMemory({ silent = false } = {}) {
+        async function loadMemory({ silent = false, clearProposals = true } = {}) {
           if (!state.conversationId) {
             roche.ui.toast("请先选择会话。");
-            return;
+            return false;
           }
-          if (!silent) setBusy(true);
+          if (!silent) {
+            setBusy(true);
+            roche.ui.toast("正在重新读取事实记忆……");
+          }
           try {
             await loadTracker();
             const memory = await roche.memory.getLongTerm({
@@ -1113,15 +1181,35 @@ ${JSON.stringify(records, null, 2)}`;
             });
             state.core = memory?.core || null;
             state.facts = Array.isArray(memory?.facts) ? memory.facts : [];
-            state.proposals.clear();
-            state.showResults = false;
-            log(`已读取事实记忆 ${state.facts.length} 条。`);
+            if (clearProposals) {
+              state.proposals.clear();
+              state.showResults = false;
+            }
+            log(`已重新读取事实记忆 ${state.facts.length} 条。`);
+            if (!silent) roche.ui.toast(`已重新读取 ${state.facts.length} 条事实记忆。`);
+            return true;
           } catch (err) {
             roche.ui.toast("读取记忆失败：" + (err?.message || err));
             log("读取记忆失败：" + (err?.message || err));
+            return false;
           } finally {
             if (!silent) setBusy(false);
           }
+        }
+
+
+        async function ensureFreshMemoryForAction(label = "处理") {
+          log(`${label}前强制重新读取事实记忆。`);
+          const ok = await loadMemory({ silent: true, clearProposals: true });
+          if (!ok) throw new Error("重新读取记忆失败");
+          return currentRows();
+        }
+
+        async function refreshAfterApply() {
+          await sleep(800);
+          await loadMemory({ silent: true, clearProposals: true });
+          await sleep(600);
+          await loadMemory({ silent: true, clearProposals: true });
         }
 
         async function reviewRows(rows, mode = "review", workflow = mode) {
@@ -1171,11 +1259,23 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function washAll() {
-          await reviewRows(currentRows(), "review", "washAll");
+          try {
+            const rows = await ensureFreshMemoryForAction("大清洗");
+            await reviewRows(rows, "review", "washAll");
+          } catch (err) {
+            roche.ui.toast("大清洗前读取失败：" + (err?.message || err));
+          }
         }
 
         async function cleanNew() {
-          const rows = currentRows().filter(r => r.isNew || r.isChanged);
+          let freshRows;
+          try {
+            freshRows = await ensureFreshMemoryForAction("清理新增");
+          } catch (err) {
+            roche.ui.toast("清理新增前读取失败：" + (err?.message || err));
+            return;
+          }
+          const rows = freshRows.filter(r => r.isNew || r.isChanged);
           if (!state.tracker?.cleanedAt) {
             const ok = await roche.ui.confirm({
               title: "首次清理提示",
@@ -1187,7 +1287,14 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function quickCompressFlagged() {
-          const rows = currentRows().filter(r =>
+          let freshRows;
+          try {
+            freshRows = await ensureFreshMemoryForAction("压缩流水账");
+          } catch (err) {
+            roche.ui.toast("压缩前读取失败：" + (err?.message || err));
+            return;
+          }
+          const rows = freshRows.filter(r =>
             r.analysis.flags.includes("过长") ||
             r.analysis.flags.includes("像流水账") ||
             r.analysis.flags.includes("多事件")
@@ -1196,7 +1303,14 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function archiveOldMemories() {
-          const rows = currentRows()
+          let freshRows;
+          try {
+            freshRows = await ensureFreshMemoryForAction("旧记忆归档");
+          } catch (err) {
+            roche.ui.toast("归档前读取失败：" + (err?.message || err));
+            return;
+          }
+          const rows = freshRows
             .slice()
             .sort((a, b) => (a.eventTime - b.eventTime) || (a.index - b.index))
             .slice(0, Math.max(3, state.settings.archiveCount));
@@ -1515,7 +1629,7 @@ ${JSON.stringify(records, null, 2)}`;
               else if (r === "merge") done.merge++;
               else done.skip++;
             }
-            await loadMemory({ silent: true });
+            await refreshAfterApply();
             await markAllKnown();
             state.proposals.clear();
             state.showResults = false;
@@ -1607,6 +1721,76 @@ ${JSON.stringify(records, null, 2)}`;
           }
         }
 
+        async function tightenProposal(id, index = null) {
+          syncEditedProposal(id);
+          const p = state.proposals.get(id);
+          if (!p) return;
+
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
+          let currentText = "";
+          let currentType = p.action;
+
+          if (index !== null && p.action === "SPLIT") {
+            const idx = Number(index);
+            currentText = String(p.newItems?.[idx]?.text || "").trim();
+            currentType = "SPLIT_ITEM";
+          } else if (p.type === "archive") {
+            currentText = String(p.archiveText || "").trim();
+          } else {
+            currentText = String(p.newText || "").trim();
+          }
+
+          if (!currentText) {
+            roche.ui.toast("没有可压缩的内容。");
+            return;
+          }
+
+          setBusy(true);
+          try {
+            const result = await askAiToTighten(roche, {
+              action: currentType,
+              text: currentText,
+              who: p.who,
+              when: p.when,
+              where: p.where,
+              how: p.how
+            }, state.settings, state.customInstruction);
+
+            if (!result) {
+              roche.ui.toast("AI没有返回可用压缩文本。");
+              return;
+            }
+
+            if (index !== null && p.action === "SPLIT") {
+              const idx = Number(index);
+              p.newItems[idx] = {
+                ...(p.newItems[idx] || {}),
+                text: result.text,
+                keywords: result.keywords
+              };
+            } else if (p.type === "archive") {
+              p.archiveText = result.text;
+              p.keywords = result.keywords;
+            } else {
+              p.newText = result.text;
+              p.keywords = result.keywords;
+            }
+
+            p.who = result.who || p.who;
+            p.when = result.when || p.when;
+            p.where = result.where || p.where;
+            p.how = result.how || p.how;
+            state.proposals.set(id, p);
+            state.showResults = true;
+            roche.ui.toast("已压短。");
+            render();
+          } catch (err) {
+            roche.ui.toast("压短失败：" + (err?.message || err));
+          } finally {
+            setBusy(false);
+          }
+        }
+
         function removeSplitItem(id, index) {
           syncEditedProposal(id);
           const p = state.proposals.get(id);
@@ -1629,7 +1813,13 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function repairMemoryOrder() {
-          const rows = currentRows();
+          let rows;
+          try {
+            rows = await ensureFreshMemoryForAction("修复顺序");
+          } catch (err) {
+            roche.ui.toast("修复顺序前读取失败：" + (err?.message || err));
+            return;
+          }
           if (!rows.length) {
             roche.ui.toast("没有可重排的事实记忆。");
             return;
@@ -1679,7 +1869,7 @@ ${JSON.stringify(records, null, 2)}`;
               });
             }
 
-            await loadMemory({ silent: true });
+            await refreshAfterApply();
             await markAllKnown();
             roche.ui.toast("记忆顺序已重建，并已更新清理新增索引。");
             log(`已修复记忆顺序：重建 ${rows.length} 条，备份已保存。`);
@@ -1798,7 +1988,10 @@ ${JSON.stringify(records, null, 2)}`;
             <div class="mtc-split-box">
               <div class="mtc-row" style="justify-content:space-between">
                 <div class="mtc-muted">新记忆 ${i + 1}</div>
-                <button type="button" class="danger" data-action="remove-split-item" data-id="${escapeHtml(p.id)}" data-index="${i}">删除此条</button>
+                <span class="mtc-row">
+                  <button type="button" data-action="tighten-split-item" data-id="${escapeHtml(p.id)}" data-index="${i}">AI压短此条</button>
+                  <button type="button" class="danger" data-action="remove-split-item" data-id="${escapeHtml(p.id)}" data-index="${i}">删除此条</button>
+                </span>
               </div>
               <textarea class="mtc-edit-text" data-role="split" data-id="${escapeHtml(p.id)}" data-index="${i}">${escapeHtml(finalMemoryText(item.text, item.keywords, state.settings))}</textarea>
             </div>
@@ -1835,9 +2028,11 @@ ${JSON.stringify(records, null, 2)}`;
           const isArchive = p.type === "archive";
           const isGrouped = p.type === "archive" || p.type === "merge";
           const canCompress = !isGrouped && (p.action === "SPLIT" || p.action === "DELETE");
+          const canTighten = p.action === "COMPRESS" || p.action === "MERGE_REPLACE" || p.action === "ARCHIVE_REPLACE" || p.action === "ARCHIVE_KEEP";
           return `
             <div class="mtc-row" style="margin-top:8px">
               ${!isGrouped ? `<button type="button" data-action="rerun" data-id="${id}">让AI重改</button>` : ""}
+              ${canTighten ? `<button type="button" data-action="tighten" data-id="${id}">AI压短</button>` : ""}
               ${canCompress ? `<button type="button" data-action="single-compress" data-id="${id}">改为单条压缩</button>` : ""}
               <button type="button" data-action="mark-keep" data-id="${id}">保留原文</button>
               <button type="button" class="danger" data-action="mark-delete" data-id="${id}">删除这条</button>
@@ -1892,14 +2087,14 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.3</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4</div>
             </div>
 
             <div class="mtc-card">
               <div class="mtc-row">
                 <select id="mtc-conversation">${convOptions || `<option value="">未读取会话</option>`}</select>
-                <button type="button" data-action="load-conv" ${disabled}>刷新会话</button>
-                <button type="button" data-action="load-memory" class="act-apply" ${disabled}>读取记忆</button>
+                <button type="button" data-action="load-conv" ${disabled}>刷新会话列表</button>
+                <button type="button" data-action="load-memory" class="act-apply" ${disabled}>重新读取记忆</button>
               </div>
               <div class="mtc-row" style="margin-top:8px">
                 <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1;min-width:220px">
@@ -1940,7 +2135,7 @@ ${JSON.stringify(records, null, 2)}`;
                   <b>新增提示词</b><span>给本次 AI 操作加临时要求，不写入记忆。</span>
                 </button>
                 <button type="button" class="mtc-action act-review" data-action="toggle-results" ${disabled}>
-                  <b>查看/编辑结果${s.aiResults ? `（${s.aiResults}）` : ""}</b><span>查看 AI 方案，手动编辑、重改、标记删除或保留。</span>
+                  <b>查看/编辑结果${s.aiResults ? `（${s.aiResults}）` : ""}</b><span>查看 AI 方案，手动编辑、重改、压短、标记删除或保留。</span>
                 </button>
                 <button type="button" class="mtc-action act-apply" data-action="apply-all" ${disabled}>
                   <b>应用全部结果${s.actionable ? `（${s.actionable}）` : ""}</b><span>真正写回事实记忆，属于最终提交。</span>
@@ -2080,6 +2275,8 @@ ${JSON.stringify(records, null, 2)}`;
             if (action === "restore-defaults") return restoreDefaultSettings();
             if (action === "rerun") return rerunOneAi(id);
             if (action === "single-compress") return convertToSingleCompress(id);
+            if (action === "tighten") return tightenProposal(id);
+            if (action === "tighten-split-item") return tightenProposal(id, btn.dataset.index);
             if (action === "remove-split-item") return removeSplitItem(id, btn.dataset.index);
             if (action === "mark-keep") return markKeep(id);
             if (action === "mark-delete") return markDelete(id);
