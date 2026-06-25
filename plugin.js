@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.4.1";
+  const VERSION = "3.4.3";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -1067,6 +1067,9 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         function setBusy(busy) {
+          if (state?.proposals?.size) {
+            try { syncAllEdited(); } catch (_) {}
+          }
           state.busy = busy;
           render();
         }
@@ -1412,6 +1415,38 @@ ${JSON.stringify(records, null, 2)}`;
           Array.from(state.proposals.keys()).forEach(id => syncEditedProposal(id));
         }
 
+        function cacheEditedFromInput(target) {
+          const role = target?.dataset?.role;
+          const id = target?.dataset?.id;
+          if (!role || !id) return;
+          const p = state.proposals.get(id);
+          if (!p) return;
+
+          const value = String(target.value || "").trim();
+
+          if (role === "archive") {
+            p.archiveText = value;
+            p.keywords = [];
+          } else if (role === "merge") {
+            p.newText = value;
+            p.keywords = [];
+          } else if (role === "compress") {
+            p.newText = value;
+            p.keywords = [];
+          } else if (role === "split") {
+            const idx = Number(target.dataset.index);
+            if (Number.isFinite(idx) && p.newItems?.[idx]) {
+              p.newItems[idx] = {
+                ...(p.newItems[idx] || {}),
+                text: value,
+                keywords: []
+              };
+            }
+          }
+
+          state.proposals.set(id, p);
+        }
+
         function proposalEventTime(p) {
           if (!p) return Infinity;
           if (p.type === "archive" || p.type === "merge") {
@@ -1659,6 +1694,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         function markKeep(id) {
+          syncAllEdited();
           const p = state.proposals.get(id);
           if (!p) return;
           if (!p._savedOriginal) p._savedOriginal = clonePlain(p);
@@ -1670,6 +1706,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         function markDelete(id) {
+          syncAllEdited();
           const p = state.proposals.get(id);
           if (!p) return;
           if (!p._savedOriginal) p._savedOriginal = clonePlain(p);
@@ -1681,6 +1718,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         function undoMark(id) {
+          syncAllEdited();
           const p = state.proposals.get(id);
           if (!p) return;
           if (p._savedOriginal) state.proposals.set(id, p._savedOriginal);
@@ -1689,6 +1727,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function rerunMergeAi(id) {
+          syncAllEdited();
           const p = state.proposals.get(id);
           if (!p || p.type !== "merge") return;
 
@@ -1732,6 +1771,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function rerunOneAi(id) {
+          syncAllEdited();
           const p = state.proposals.get(id);
           const row = currentRows().find(r => r.id === id);
           if (!row) return;
@@ -1757,6 +1797,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function convertToSingleCompress(id) {
+          syncAllEdited();
           const row = currentRows().find(r => r.id === id);
           if (!row) return;
           state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
@@ -1778,7 +1819,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function tightenProposal(id, index = null) {
-          syncEditedProposal(id);
+          syncAllEdited();
           const p = state.proposals.get(id);
           if (!p) return;
 
@@ -1848,7 +1889,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         function removeSplitItem(id, index) {
-          syncEditedProposal(id);
+          syncAllEdited();
           const p = state.proposals.get(id);
           if (!p || p.action !== "SPLIT") return;
           const idx = Number(index);
@@ -2143,7 +2184,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.4.1</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4.3</div>
             </div>
 
             <div class="mtc-card">
@@ -2192,9 +2233,6 @@ ${JSON.stringify(records, null, 2)}`;
                 </button>
                 <button type="button" class="mtc-action act-review" data-action="toggle-results" ${disabled}>
                   <b>查看/编辑结果${s.aiResults ? `（${s.aiResults}）` : ""}</b><span>查看 AI 方案，手动编辑、重改、压短、标记删除或保留。</span>
-                </button>
-                <button type="button" class="mtc-action act-apply" data-action="apply-all" ${disabled}>
-                  <b>应用全部结果${s.actionable ? `（${s.actionable}）` : ""}</b><span>真正写回事实记忆，属于最终提交。</span>
                 </button>
               </div>
 
@@ -2266,6 +2304,7 @@ ${JSON.stringify(records, null, 2)}`;
 
           root.addEventListener("input", e => {
             if (e.target?.id === "mtc-custom-instruction") state.customInstruction = e.target.value;
+            if (e.target?.matches?.("textarea[data-role][data-id]")) cacheEditedFromInput(e.target);
           });
 
           root.addEventListener("change", e => {
@@ -2299,6 +2338,15 @@ ${JSON.stringify(records, null, 2)}`;
 
             const action = btn.dataset.action;
             const id = btn.dataset.id;
+
+            const preservesDraftActions = new Set([
+              "toggle-prompt", "toggle-results", "apply-all", "rerun", "rerun-merge",
+              "single-compress", "tighten", "tighten-split-item", "remove-split-item",
+              "mark-keep", "mark-delete", "undo"
+            ]);
+            if (preservesDraftActions.has(action)) {
+              syncAllEdited();
+            }
 
             if (action === "back") return roche.ui.closeApp();
             if (action === "load-conv") return loadConversations();
