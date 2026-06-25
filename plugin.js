@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.4.3";
+  const VERSION = "3.4.4";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -2184,7 +2184,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.4.3</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4.4</div>
             </div>
 
             <div class="mtc-card">
@@ -2230,9 +2230,6 @@ ${JSON.stringify(records, null, 2)}`;
                 </button>
                 <button type="button" class="mtc-action act-prompt" data-action="toggle-prompt" ${disabled}>
                   <b>新增提示词</b><span>给本次 AI 操作加临时要求，不写入记忆。</span>
-                </button>
-                <button type="button" class="mtc-action act-review" data-action="toggle-results" ${disabled}>
-                  <b>查看/编辑结果${s.aiResults ? `（${s.aiResults}）` : ""}</b><span>查看 AI 方案，手动编辑、重改、压短、标记删除或保留。</span>
                 </button>
               </div>
 
@@ -2340,7 +2337,7 @@ ${JSON.stringify(records, null, 2)}`;
             const id = btn.dataset.id;
 
             const preservesDraftActions = new Set([
-              "toggle-prompt", "toggle-results", "apply-all", "rerun", "rerun-merge",
+              "toggle-prompt", "apply-all", "rerun", "rerun-merge",
               "single-compress", "tighten", "tighten-split-item", "remove-split-item",
               "mark-keep", "mark-delete", "undo"
             ]);
@@ -2368,10 +2365,6 @@ ${JSON.stringify(records, null, 2)}`;
             if (action === "repair-order") return repairMemoryOrder();
             if (action === "toggle-prompt") {
               state.showPrompt = !state.showPrompt;
-              return render();
-            }
-            if (action === "toggle-results") {
-              state.showResults = !state.showResults;
               return render();
             }
             if (action === "apply-all") return applyAllResults();
