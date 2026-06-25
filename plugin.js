@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.6.0";
+  const VERSION = "2.7.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -13,17 +13,18 @@
     keywordLimit: 4,
     batchSize: 1,
     longTermLimit: 300,
+    archiveCount: 10,
     writeKeywords: true,
-    autoApplySafeCompress: false,
-    showCore: false,
-    executeAllAiSuggestions: false
+    executeAllAiSuggestions: false,
+    showCore: false
   };
 
   const IMPORTANT_HINTS = [
     "承诺","答应","拒绝","边界","和解","争吵","冲突","分手","复合","告白","认错",
     "亲密","关系","信任","远距离","离开","重逢","搬家","地点","见面","以后","未来",
     "配偶","婚姻","称呼","面具","钥匙","家","公寓","主动","不再","默认","拉黑",
-    "道歉","love","照片","自拍","石头","物件","贴身","香港","英国","伦敦"
+    "道歉","love","照片","自拍","石头","物件","贴身","香港","英国","伦敦",
+    "天津","奶奶","亲属卡","家庭","归档","离港","离别"
   ];
 
   const LOW_VALUE_HINTS = [
@@ -64,6 +65,20 @@
     return Math.max(1, cjk + words + Math.ceil(Math.max(0, s.length - cjk) / 8));
   }
 
+  function hashText(text) {
+    const s = String(text || "").replace(/\s+/g, " ").trim();
+    let h1 = 0xdeadbeef ^ s.length;
+    let h2 = 0x41c6ce57 ^ s.length;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charCodeAt(i);
+      h1 = Math.imul(h1 ^ ch, 2654435761);
+      h2 = Math.imul(h2 ^ ch, 1597334677);
+    }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return ((h2 >>> 0).toString(36) + (h1 >>> 0).toString(36));
+  }
+
   function cleanCustomInstruction(text) {
     return String(text || "").replace(/\r/g, "").trim().slice(0, 1200);
   }
@@ -71,7 +86,7 @@
   function keywordTags(keywords, limit) {
     return unique(keywords)
       .slice(0, limit)
-      .map(k => k.replace(/^#/, "").replace(/\s+/g, ""))
+      .map(k => String(k).replace(/^#/, "").replace(/\s+/g, ""))
       .filter(Boolean)
       .map(k => `#${k}`)
       .join(" ");
@@ -80,10 +95,10 @@
   function extractKeywordsFromText(text, limit = 4) {
     const t = String(text || "");
     const hits = [];
+    const hashTags = (t.match(/#[\u4e00-\u9fffA-Za-z0-9_-]+/g) || []).map(x => x.slice(1));
     for (const k of IMPORTANT_HINTS) {
       if (t.includes(k)) hits.push(k);
     }
-    const hashTags = (t.match(/#[\u4e00-\u9fffA-Za-z0-9_-]+/g) || []).map(x => x.slice(1));
     return unique([...hashTags, ...hits]).slice(0, Math.max(0, limit));
   }
 
@@ -91,14 +106,13 @@
     const body = String(text || "").trim();
     if (!body) return "";
     if (!settings.writeKeywords) return body;
+    if (/#\S+/.test(body)) return body;
     const tags = keywordTags(keywords, settings.keywordLimit);
     return tags ? `${body} ${tags}` : body;
   }
 
   function stripCodeFence(text) {
-    let t = String(text || "").trim();
-    t = t.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
-    return t;
+    return String(text || "").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
   }
 
   function repairJsonText(text) {
@@ -112,7 +126,7 @@
   function safeJsonParse(text) {
     const raw = repairJsonText(stripCodeFence(text));
 
-    const parseAndNormalize = obj => {
+    const normalize = obj => {
       if (Array.isArray(obj)) return obj;
       if (Array.isArray(obj?.items)) return obj.items;
       if (Array.isArray(obj?.results)) return obj.results;
@@ -121,23 +135,23 @@
       return [];
     };
 
-    try { return parseAndNormalize(JSON.parse(raw)); } catch (_) {}
+    try { return normalize(JSON.parse(raw)); } catch (_) {}
 
     const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
     if (fenced) {
-      try { return parseAndNormalize(JSON.parse(repairJsonText(fenced[1]))); } catch (_) {}
+      try { return normalize(JSON.parse(repairJsonText(fenced[1]))); } catch (_) {}
     }
 
     const objectStart = raw.indexOf("{");
     const objectEnd = raw.lastIndexOf("}");
     if (objectStart !== -1 && objectEnd > objectStart) {
-      try { return parseAndNormalize(JSON.parse(raw.slice(objectStart, objectEnd + 1))); } catch (_) {}
+      try { return normalize(JSON.parse(raw.slice(objectStart, objectEnd + 1))); } catch (_) {}
     }
 
     const arrayStart = raw.indexOf("[");
     const arrayEnd = raw.lastIndexOf("]");
     if (arrayStart !== -1 && arrayEnd > arrayStart) {
-      try { return parseAndNormalize(JSON.parse(raw.slice(arrayStart, arrayEnd + 1))); } catch (_) {}
+      try { return normalize(JSON.parse(raw.slice(arrayStart, arrayEnd + 1))); } catch (_) {}
     }
 
     return [];
@@ -183,7 +197,7 @@
         if (!t) return;
         const score =
           (/^\s*[\[{]/.test(t) ? 5 : 0) +
-          (/"action"|"items"|KEEP|COMPRESS|SPLIT|DELETE/.test(t) ? 5 : 0) +
+          (/"action"|"items"|KEEP|COMPRESS|SPLIT|DELETE|ARCHIVE/.test(t) ? 5 : 0) +
           (key === "text" || key === "content" || key === "message" ? 2 : 0);
         hits.push({ text: t, score });
         return;
@@ -208,14 +222,12 @@
     const sentenceCount = (t.match(/[。！？.!?\n]/g) || []).length;
     const lowHits = LOW_VALUE_HINTS.filter(k => t.includes(k)).length;
     const importantHits = IMPORTANT_HINTS.filter(k => t.includes(k)).length;
-    const hasHash = /#[\u4e00-\u9fffA-Za-z0-9_-]+/.test(t);
 
     const flags = [];
     if (len > settings.maxChars) flags.push("过长");
     if (timeHits >= 2 || timelineWords >= 3) flags.push("像流水账");
     if (sentenceCount >= 3) flags.push("多事件");
     if (lowHits >= 2 && importantHits === 0) flags.push("低价值倾向");
-    const keywordMissing = !hasHash && settings.writeKeywords;
 
     const priority =
       len > settings.maxChars ||
@@ -227,7 +239,7 @@
     if (flags.includes("低价值倾向") && importantHits === 0) recommendation = "DELETE";
     else if (priority) recommendation = "COMPRESS";
 
-    return { len, flags, recommendation, priority, tokenEstimate: estimateTokens(t), lowHits, importantHits, keywordMissing };
+    return { len, flags, recommendation, priority, tokenEstimate: estimateTokens(t), lowHits, importantHits };
   }
 
   function isImportantText(text) {
@@ -248,6 +260,45 @@
     let out = important.length ? important.join("；") : (parts[0] || t);
     if (charLen(out) > settings.majorMax) out = [...out].slice(0, settings.majorMax).join("");
     return out;
+  }
+
+  function extractEventTime(text) {
+    const t = String(text || "");
+    const iso = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})/);
+    if (iso) {
+      const y = Number(iso[1]), m = Number(iso[2]), d = Number(iso[3]);
+      const time = new Date(y, m - 1, d).getTime();
+      if (Number.isFinite(time)) return time;
+    }
+    const md = t.match(/(\d{1,2})月(\d{1,2})日/);
+    if (md) {
+      const now = new Date();
+      const y = now.getFullYear();
+      const time = new Date(y, Number(md[1]) - 1, Number(md[2])).getTime();
+      if (Number.isFinite(time)) return time;
+    }
+    return Infinity;
+  }
+
+  function makeProposalId(prefix) {
+    return `${prefix}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function clonePlain(obj) {
+    try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
+  }
+
+  function normalizeSplitItems(newItems, fallbackKeywords = []) {
+    if (!Array.isArray(newItems)) return [];
+    return newItems.map(item => {
+      if (typeof item === "string") {
+        return { text: item.trim(), keywords: extractKeywordsFromText(item).slice(0, 4) };
+      }
+      return {
+        text: String(item?.text || item?.content || item?.newText || "").trim(),
+        keywords: unique(item?.keywords || fallbackKeywords).slice(0, 4)
+      };
+    }).filter(item => item.text);
   }
 
   function fallbackReviewRecords(records, settings, mode = "review") {
@@ -285,37 +336,6 @@
     });
   }
 
-  function looseParseReviewText(text, records, settings, mode = "review") {
-    const raw = String(text || "").trim();
-    if (!raw) return [];
-    const results = [];
-    for (const record of records || []) {
-      const id = String(record.id || "");
-      if (!id) continue;
-      const idx = raw.indexOf(id);
-      if (idx === -1) continue;
-      const chunk = raw.slice(idx, idx + 1200);
-      let action = "";
-      if (/SPLIT|拆分/.test(chunk) && mode !== "compressOnly") action = "SPLIT";
-      else if (/DELETE|删除|遗忘/.test(chunk) && mode !== "compressOnly") action = "DELETE";
-      else if (/COMPRESS|压缩|改写|重写/.test(chunk)) action = "COMPRESS";
-      else if (/KEEP|保留/.test(chunk)) action = "KEEP";
-      if (!action) continue;
-
-      const newText = action === "COMPRESS" ? simpleCompressText(record.text, settings) : "";
-      results.push({
-        id,
-        action,
-        newText,
-        newItems: [],
-        keywords: extractKeywordsFromText((record.text || "") + " " + newText, settings.keywordLimit),
-        risk: action === "SPLIT" || (action === "DELETE" && isImportantText(record.text)) ? "confirm" : "safe",
-        reason: "宽松解析"
-      });
-    }
-    return results;
-  }
-
   function buildReviewerPrompt(records, settings, customInstruction = "", mode = "review") {
     const compressOnly = mode === "compressOnly";
     const extra = cleanCustomInstruction(customInstruction);
@@ -330,7 +350,7 @@ ${compressOnly ? "仅压缩过长/流水账。只能返回 KEEP 或 COMPRESS，�
 Fact Memory 规则：
 1. Fact 必须像事件：谁因为什么，在什么情况下做了什么，造成什么关系后果。
 2. 禁止写成二次人设或行为归纳。不要写“逐渐习惯”“形成模式”“通常会”“倾向于”“已经开始用……维持……”。
-3. 不要把事件压成抽象标签，例如“关系更亲密”“更加重视感受”。必须保留事件骨架。
+3. 不要把事件压成抽象标签。必须保留事件骨架。
 4. 不要添加原文没有的信息。禁止补天气、氛围、心理动机、小说化收束句。
 5. 不要为了好看而润色。只保留事件、动作、关系后果。
 
@@ -368,7 +388,7 @@ COMPRESS：单条事件仍有价值，但太长或流水账，压成一条事件
 SPLIT：一条旧记忆包含 2-3 个独立重要事件，拆成 2-3 条事件记忆。
 DELETE：无长期后果、重复、过时、低价值，应遗忘。
 
-${extra ? `本次用户补充要求：\n${extra}\n` : ""}
+${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
 只返回严格 JSON 对象，不要解释，不要 Markdown。格式：
 {
@@ -377,8 +397,8 @@ ${extra ? `本次用户补充要求：\n${extra}\n` : ""}
       "id": "原id",
       "action": "KEEP|COMPRESS${compressOnly ? "" : "|SPLIT|DELETE"}",
       "newText": "COMPRESS时填写；其他动作可空",
-      "newItems": ["SPLIT时填写2-3条新事件记忆"],
-      "keywords": ["具体关键词1","具体关键词2"],
+      "newItems": [{"text":"SPLIT时的新记忆1","keywords":["本条关键词1"]}],
+      "keywords": ["COMPRESS或DELETE时的具体关键词"],
       "risk": "safe|confirm",
       "reason": "不超过18字"
     }
@@ -389,8 +409,69 @@ ${extra ? `本次用户补充要求：\n${extra}\n` : ""}
 ${JSON.stringify(records, null, 2)}`;
   }
 
-  async function askAiForReview(roche, records, settings, customInstruction = "", mode = "review") {
-    const prompt = buildReviewerPrompt(records, settings, customInstruction, mode);
+  function buildSingleCompressPrompt(record, customInstruction = "") {
+    const extra = cleanCustomInstruction(customInstruction);
+    return `用户不想拆分或删除这条事实记忆。请把它改为单条压缩记忆，抹去次要细节，只保留最重要的长期事件轮廓。不要 SPLIT，不要 DELETE。不要添加原文没有的信息。
+
+${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
+
+只返回严格 JSON 对象：
+{
+  "items": [
+    {
+      "id": "${record.id}",
+      "action": "COMPRESS",
+      "newText": "单条压缩后的事实记忆",
+      "keywords": ["具体关键词1","具体关键词2"],
+      "reason": "不超过18字"
+    }
+  ]
+}
+
+原记忆：
+${JSON.stringify(record, null, 2)}`;
+  }
+
+  function buildArchivePrompt(records, settings, customInstruction = "") {
+    const extra = cleanCustomInstruction(customInstruction);
+    return `你是 Roche 旧记忆归档器。你的任务不是清洗近期事实，而是模拟人脑记忆减退：把更早的事实记忆整理成模糊的阶段叙事，或删除无长期意义的旧细节。
+
+归档目标：
+1. 把旧事实从“高清流水账”变成“朴素阶段记忆”。
+2. 可以按同一段时间合并多条不同事件线，例如家庭线、金钱线、冲突线、离别线，只要它们确实属于同一阶段。
+3. 合并后的记忆要像一段朴素叙事：地点、人物、主要事件、关系后果。
+4. 不要写成文艺描写，不要写天气、气氛、心理渲染。
+5. 模糊具体日期时间，不要写几月几日、几点、早晨、中午、晚上。可以写“那段时间”“后来”“同一阶段”“六月里”“离开前后”“早期相处里”等。
+6. 不要补原文没有的信息。
+7. 如果旧事实只是重复小互动、普通调情、表情包、无后果照片，可以 DELETE。
+8. 如果内容仍然太重要、不能减退，返回 KEEP。
+9. 默认优先使用 ARCHIVE_REPLACE：生成归档记忆，并删除被归档的旧事实。
+
+归档粒度：
+- 阶段归档：允许把同一段时间的多条线合成 1-3 条阶段叙事。
+- 输出每条归档记忆 120-260 中文字。
+- 关键词要少而具体，2-5 个。
+
+${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
+
+只返回严格 JSON 对象，不要解释，不要 Markdown。格式：
+{
+  "items": [
+    {
+      "sourceIds": ["被归档或删除的原id"],
+      "action": "ARCHIVE_REPLACE|ARCHIVE_KEEP|DELETE|KEEP",
+      "archiveText": "ARCHIVE时填写阶段叙事",
+      "keywords": ["具体关键词1","具体关键词2"],
+      "reason": "不超过18字"
+    }
+  ]
+}
+
+待归档旧记忆：
+${JSON.stringify(records, null, 2)}`;
+  }
+
+  async function askAi(roche, prompt) {
     const result = await roche.ai.chat({
       messages: [
         { role: "system", content: "你是 JSON API。只输出有效 JSON 对象，格式为 {\"items\":[...]}。不要解释，不要 Markdown。" },
@@ -398,13 +479,13 @@ ${JSON.stringify(records, null, 2)}`;
       ],
       temperature: 0
     });
+    return safeJsonParse(extractAiText(result));
+  }
 
-    const text = extractAiText(result);
-    let parsed = safeJsonParse(text);
+  async function askAiForReview(roche, records, settings, customInstruction = "", mode = "review") {
+    const prompt = buildReviewerPrompt(records, settings, customInstruction, mode);
+    let parsed = await askAi(roche, prompt);
     if (parsed.length) return parsed;
-
-    const loose = looseParseReviewText(text, records, settings, mode);
-    if (loose.length) return loose;
 
     if (records.length > 1) {
       const recovered = [];
@@ -421,6 +502,11 @@ ${JSON.stringify(records, null, 2)}`;
     return fallbackReviewRecords(records, settings, mode);
   }
 
+  async function askAiForSingleCompress(roche, row, customInstruction = "") {
+    const parsed = await askAi(roche, buildSingleCompressPrompt({ id: row.id, text: row.text }, customInstruction));
+    return parsed?.[0] || null;
+  }
+
   function normalizeProposal(p, factMap, settings, mode = "review") {
     const id = String(p?.id || "").trim();
     let action = String(p?.action || "KEEP").trim().toUpperCase();
@@ -428,11 +514,11 @@ ${JSON.stringify(records, null, 2)}`;
     if (!["KEEP","COMPRESS","SPLIT","DELETE"].includes(action)) action = "KEEP";
     if (!factMap.has(id)) action = "KEEP";
 
-    let newText = String(p?.newText || "").trim();
-    let newItems = Array.isArray(p?.newItems) ? p.newItems.map(x => String(x || "").trim()).filter(Boolean) : [];
-    const keywords = unique(p?.keywords || []).slice(0, settings.keywordLimit);
-    const reason = String(p?.reason || "").trim().slice(0, 40);
     const original = factMap.get(id)?.text || "";
+    const keywords = unique(p?.keywords || []).slice(0, settings.keywordLimit);
+    let newText = String(p?.newText || "").trim();
+    let newItems = normalizeSplitItems(p?.newItems, keywords);
+    let reason = String(p?.reason || "").trim().slice(0, 40);
 
     let needsManual = false;
     const manualReasons = [];
@@ -455,9 +541,9 @@ ${JSON.stringify(records, null, 2)}`;
     }
 
     if (action === "SPLIT") {
-      newItems = newItems.slice(0, 3).map(x => {
-        if (charLen(x) > settings.majorMax) return [...x].slice(0, settings.majorMax).join("");
-        return x;
+      newItems = newItems.slice(0, 3).map(item => {
+        const text = charLen(item.text) > settings.majorMax ? [...item.text].slice(0, settings.majorMax).join("") : item.text;
+        return { text, keywords: unique(item.keywords).slice(0, settings.keywordLimit) };
       });
       if (newItems.length < 2) {
         action = "COMPRESS";
@@ -468,7 +554,6 @@ ${JSON.stringify(records, null, 2)}`;
     }
 
     if (action === "DELETE" && isImportantText(original)) {
-      // 不再强制阻塞，只标记为需处理；用户可在“全部执行AI建议”模式下照样一键执行。
       needsManual = true;
       manualReasons.push("重要内容删除");
     }
@@ -478,10 +563,41 @@ ${JSON.stringify(records, null, 2)}`;
     if (needsManual) risk = "confirm";
 
     return {
-      id, action, newText, newItems, keywords,
+      id, sourceIds: [id], action, newText, newItems, keywords,
       reason: manualReasons[0] || reason,
-      risk,
-      needsManual
+      risk, needsManual,
+      type: "fact"
+    };
+  }
+
+  function normalizeArchiveProposal(p, rows, settings) {
+    const rowIds = new Set(rows.map(r => r.id));
+    const sourceIds = unique(p?.sourceIds || p?.ids || []).filter(id => rowIds.has(id));
+    let action = String(p?.action || "KEEP").trim().toUpperCase();
+    if (!["ARCHIVE_REPLACE","ARCHIVE_KEEP","DELETE","KEEP"].includes(action)) action = "KEEP";
+    if (!sourceIds.length) action = "KEEP";
+
+    let archiveText = String(p?.archiveText || p?.newText || p?.text || "").trim();
+    const keywords = unique(p?.keywords || extractKeywordsFromText(archiveText, settings.keywordLimit)).slice(0, settings.keywordLimit);
+    let needsManual = false;
+    let reason = String(p?.reason || "").trim().slice(0, 40);
+
+    if ((action === "ARCHIVE_REPLACE" || action === "ARCHIVE_KEEP") && !archiveText) {
+      action = "KEEP";
+      needsManual = true;
+      reason = "归档为空";
+    }
+
+    return {
+      id: makeProposalId("archive"),
+      sourceIds,
+      action,
+      archiveText,
+      keywords,
+      reason,
+      risk: needsManual ? "confirm" : "safe",
+      needsManual,
+      type: "archive"
     };
   }
 
@@ -501,23 +617,34 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner {
         --mtc-bg:#fff; --mtc-text:#1f2328; --mtc-muted-color:rgba(31,35,40,.62);
         --mtc-card-bg:#fff; --mtc-soft-bg:#f1f3f5; --mtc-border-color:rgba(31,35,40,.13);
-        --mtc-top-bg:rgba(255,255,255,.96); --mtc-primary-bg:#dfe8ff; --mtc-primary-border:#b7c7ff;
-        --mtc-danger-bg:#ffe5e5; --mtc-danger-border:#ffc1c1; --mtc-success-bg:#dff7e8; --mtc-success-border:#9fddb8;
+        --mtc-top-bg:rgba(255,255,255,.96);
+        --mtc-green:#dff7e8; --mtc-green-border:#9fddb8;
+        --mtc-orange:#ffe6d8; --mtc-orange-border:#ffb589;
+        --mtc-blue:#dff0ff; --mtc-blue-border:#9fcaf0;
+        --mtc-purple:#efe3ff; --mtc-purple-border:#c9a9f0;
+        --mtc-yellow:#fff2c8; --mtc-yellow-border:#e8c75d;
+        --mtc-slate:#e7edf5; --mtc-slate-border:#b9c6d8;
+        --mtc-deep:#cfeedd; --mtc-deep-border:#73b98d;
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        color: var(--mtc-text);
-        background: var(--mtc-bg);
+        color: var(--mtc-text); background: var(--mtc-bg);
         position:absolute; inset:0; display:block;
         padding:14px; padding-bottom:calc(40px + env(safe-area-inset-bottom,0px));
-        overflow-y:scroll !important; overflow-x:hidden !important;
-        -webkit-overflow-scrolling:touch; overscroll-behavior-y:contain; touch-action:pan-y;
+        overflow-y:auto !important; overflow-x:hidden !important;
+        -webkit-overflow-scrolling:touch; overscroll-behavior-y:contain;
         box-sizing:border-box;
       }
       @media (prefers-color-scheme: dark) {
         .roche-plugin-memory-token-cleaner {
           --mtc-bg:#111216; --mtc-text:#f4f6f8; --mtc-muted-color:rgba(244,246,248,.68);
           --mtc-card-bg:rgba(255,255,255,.07); --mtc-soft-bg:rgba(255,255,255,.10); --mtc-border-color:rgba(255,255,255,.14);
-          --mtc-top-bg:rgba(17,18,22,.96); --mtc-primary-bg:rgba(100,145,255,.28); --mtc-primary-border:rgba(140,170,255,.50);
-          --mtc-danger-bg:rgba(255,90,90,.18); --mtc-danger-border:rgba(255,120,120,.42); --mtc-success-bg:rgba(70,190,120,.22); --mtc-success-border:rgba(110,220,150,.45);
+          --mtc-top-bg:rgba(17,18,22,.96);
+          --mtc-green:rgba(70,190,120,.22); --mtc-green-border:rgba(110,220,150,.45);
+          --mtc-orange:rgba(255,120,70,.22); --mtc-orange-border:rgba(255,170,120,.45);
+          --mtc-blue:rgba(80,155,220,.22); --mtc-blue-border:rgba(120,190,255,.45);
+          --mtc-purple:rgba(160,100,230,.25); --mtc-purple-border:rgba(200,160,255,.45);
+          --mtc-yellow:rgba(230,180,60,.24); --mtc-yellow-border:rgba(245,210,110,.50);
+          --mtc-slate:rgba(120,145,170,.25); --mtc-slate-border:rgba(160,180,210,.45);
+          --mtc-deep:rgba(40,150,90,.35); --mtc-deep-border:rgba(90,220,140,.55);
         }
       }
       .roche-plugin-memory-token-cleaner * { box-sizing:border-box; }
@@ -531,22 +658,15 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner select,
       .roche-plugin-memory-token-cleaner input,
       .roche-plugin-memory-token-cleaner textarea {
-        border-radius:10px; border:1px solid var(--mtc-border-color); background:var(--mtc-card-bg); color:var(--mtc-text);
+        border-radius:12px; border:1px solid var(--mtc-border-color); background:var(--mtc-card-bg); color:var(--mtc-text);
         padding:9px 10px; font-size:14px; font-family:inherit;
       }
       .roche-plugin-memory-token-cleaner textarea { width:100%; min-height:96px; resize:vertical; line-height:1.5; }
-      .roche-plugin-memory-token-cleaner textarea::placeholder { color:rgba(31,35,40,.38); }
-      @media (prefers-color-scheme: dark) {
-        .roche-plugin-memory-token-cleaner textarea::placeholder { color:rgba(244,246,248,.38); }
-      }
-      .roche-plugin-memory-token-cleaner button { cursor:pointer; -webkit-tap-highlight-color:transparent; }
-      .roche-plugin-memory-token-cleaner button.primary { background:var(--mtc-primary-bg); border-color:var(--mtc-primary-border); }
-      .roche-plugin-memory-token-cleaner button.danger { background:var(--mtc-danger-bg); border-color:var(--mtc-danger-border); }
-      .roche-plugin-memory-token-cleaner button.success { background:var(--mtc-success-bg); border-color:var(--mtc-success-border); }
+      .roche-plugin-memory-token-cleaner button { cursor:pointer; -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
       .roche-plugin-memory-token-cleaner button:disabled { opacity:.45; cursor:not-allowed; }
       .roche-plugin-memory-token-cleaner .mtc-card,
       .roche-plugin-memory-token-cleaner .mtc-fact {
-        border:1px solid var(--mtc-border-color); background:var(--mtc-card-bg); border-radius:14px; padding:12px; margin:10px 0;
+        border:1px solid var(--mtc-border-color); background:var(--mtc-card-bg); border-radius:16px; padding:12px; margin:10px 0;
       }
       .roche-plugin-memory-token-cleaner .mtc-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
       .roche-plugin-memory-token-cleaner .mtc-row select { flex:1; min-width:180px; }
@@ -554,8 +674,19 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner .mtc-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
       .roche-plugin-memory-token-cleaner .mtc-stat { background:var(--mtc-soft-bg); border-radius:12px; padding:9px; }
       .roche-plugin-memory-token-cleaner .mtc-stat b { display:block; font-size:18px; }
-      .roche-plugin-memory-token-cleaner .mtc-list { display:none !important; }
-      .roche-plugin-memory-token-cleaner .mtc-fact { background:var(--mtc-soft-bg); }
+      .roche-plugin-memory-token-cleaner .mtc-action-grid { display:grid; grid-template-columns:1fr; gap:8px; }
+      .roche-plugin-memory-token-cleaner .mtc-action {
+        text-align:left; padding:11px 12px; display:block; border-width:1px; width:100%;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-action b { display:block; font-size:15px; margin-bottom:2px; }
+      .roche-plugin-memory-token-cleaner .mtc-action span { display:block; font-size:12px; line-height:1.35; color:var(--mtc-muted-color); }
+      .roche-plugin-memory-token-cleaner .act-new { background:var(--mtc-green); border-color:var(--mtc-green-border); }
+      .roche-plugin-memory-token-cleaner .act-wash { background:var(--mtc-orange); border-color:var(--mtc-orange-border); }
+      .roche-plugin-memory-token-cleaner .act-compress { background:var(--mtc-blue); border-color:var(--mtc-blue-border); }
+      .roche-plugin-memory-token-cleaner .act-archive { background:var(--mtc-purple); border-color:var(--mtc-purple-border); }
+      .roche-plugin-memory-token-cleaner .act-prompt { background:var(--mtc-yellow); border-color:var(--mtc-yellow-border); }
+      .roche-plugin-memory-token-cleaner .act-review { background:var(--mtc-slate); border-color:var(--mtc-slate-border); }
+      .roche-plugin-memory-token-cleaner .act-apply { background:var(--mtc-deep); border-color:var(--mtc-deep-border); }
       .roche-plugin-memory-token-cleaner .mtc-badges { display:flex; gap:5px; flex-wrap:wrap; }
       .roche-plugin-memory-token-cleaner .mtc-badge {
         display:inline-flex; align-items:center; border-radius:999px; padding:2px 7px; font-size:11px;
@@ -565,22 +696,19 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner .mtc-badge.danger { background:rgba(255,80,80,.14); border-color:rgba(255,80,80,.3); }
       .roche-plugin-memory-token-cleaner .mtc-badge.confirm { background:rgba(180,120,255,.14); border-color:rgba(180,120,255,.35); }
       .roche-plugin-memory-token-cleaner .mtc-text { white-space:pre-wrap; line-height:1.5; font-size:13px; word-break:break-word; }
-      .roche-plugin-memory-token-cleaner .mtc-proposal { margin-top:8px; padding:8px; border-radius:10px; background:rgba(90,140,255,.10); border:1px solid var(--mtc-primary-border); }
-      .roche-plugin-memory-token-cleaner .mtc-edit-text {
-        width:100%; min-height:86px; margin-top:6px; font-size:13px; line-height:1.5;
-      }
-      .roche-plugin-memory-token-cleaner .mtc-mini-title {
-        font-weight:700; margin:10px 0 6px;
-      }
+      .roche-plugin-memory-token-cleaner .mtc-proposal { margin-top:8px; padding:8px; border-radius:10px; background:rgba(90,140,255,.10); border:1px solid var(--mtc-slate-border); }
+      .roche-plugin-memory-token-cleaner .mtc-edit-text { width:100%; min-height:86px; margin-top:6px; font-size:13px; line-height:1.5; }
+      .roche-plugin-memory-token-cleaner .mtc-split-box { padding:8px; border-radius:12px; border:1px solid var(--mtc-border-color); background:var(--mtc-card-bg); margin-top:8px; }
+      .roche-plugin-memory-token-cleaner .mtc-mini-title { font-weight:700; margin:10px 0 6px; }
       .roche-plugin-memory-token-cleaner .mtc-settings-grid { display:grid; grid-template-columns:1fr 90px; gap:8px; align-items:center; }
       .roche-plugin-memory-token-cleaner .mtc-switch-button {
         width:100%; display:grid; grid-template-columns:1fr auto; gap:12px; align-items:center; text-align:left;
         padding:12px 10px; border-radius:0; border-width:0 0 1px 0; background:transparent;
       }
       .roche-plugin-memory-token-cleaner .mtc-switch-pill { min-width:44px; text-align:center; border-radius:999px; padding:4px 10px; font-size:12px; background:var(--mtc-soft-bg); border:1px solid var(--mtc-border-color); }
-      .roche-plugin-memory-token-cleaner .mtc-switch-button.on .mtc-switch-pill { background:var(--mtc-primary-bg); border-color:var(--mtc-primary-border); }
-      .roche-plugin-memory-token-cleaner .mtc-custom-panel.hidden { display:none; }
-      .roche-plugin-memory-token-cleaner .mtc-log { max-height:160px; overflow:auto; font-size:12px; line-height:1.4; background:var(--mtc-soft-bg); border-radius:12px; padding:8px; }
+      .roche-plugin-memory-token-cleaner .mtc-switch-button.on .mtc-switch-pill { background:var(--mtc-deep); border-color:var(--mtc-deep-border); }
+      .roche-plugin-memory-token-cleaner .hidden { display:none !important; }
+      .roche-plugin-memory-token-cleaner .mtc-log { max-height:120px; overflow:auto; font-size:12px; line-height:1.4; background:var(--mtc-soft-bg); border-radius:12px; padding:8px; }
       .roche-plugin-memory-token-cleaner .mtc-bottom-spacer { height:calc(80px + env(safe-area-inset-bottom,0px)); }
     `;
     return style;
@@ -602,16 +730,12 @@ ${JSON.stringify(records, null, 2)}`;
           overflow: container.style.overflow,
           height: container.style.height,
           minHeight: container.style.minHeight,
-          position: container.style.position,
-          touchAction: container.style.touchAction,
-          webkitOverflowScrolling: container.style.webkitOverflowScrolling
+          position: container.style.position
         };
         container.style.position = "relative";
         container.style.overflow = "hidden";
         container.style.height = "100dvh";
         container.style.minHeight = "0";
-        container.style.touchAction = "pan-y";
-        container.style.webkitOverflowScrolling = "touch";
 
         const root = document.createElement("div");
         root.className = "roche-plugin-memory-token-cleaner";
@@ -623,38 +747,16 @@ ${JSON.stringify(records, null, 2)}`;
           conversationId: "",
           facts: [],
           core: null,
-          vectors: [],
           proposals: new Map(),
-          selected: new Set(),
-          verified: new Set(),
+          tracker: { known: {}, cleanedAt: null },
           customInstruction: "",
           reviewMode: "review",
-          showCustomInstruction: false,
-          showConfirmPanel: false,
+          showPrompt: false,
+          showResults: false,
           busy: false
         };
 
-        function installTouchScrollFallback(scrollEl) {
-          let lastY = 0, active = false;
-          const isInteractive = target => !!target?.closest?.("input, textarea, select, button, summary, .mtc-log");
-          scrollEl.addEventListener("touchstart", e => {
-            if (!e.touches?.length) return;
-            active = true; lastY = e.touches[0].clientY;
-          }, { passive:true });
-          scrollEl.addEventListener("touchmove", e => {
-            if (!active || !e.touches?.length) return;
-            const y = e.touches[0].clientY;
-            const dy = lastY - y;
-            lastY = y;
-            if (Math.abs(dy) < 1 || scrollEl.scrollHeight <= scrollEl.clientHeight + 2) return;
-            const before = scrollEl.scrollTop;
-            scrollEl.scrollTop = before + dy;
-            if (scrollEl.scrollTop !== before && !isInteractive(e.target)) e.preventDefault();
-          }, { passive:false });
-          scrollEl.addEventListener("touchend", () => active = false, { passive:true });
-          scrollEl.addEventListener("touchcancel", () => active = false, { passive:true });
-        }
-        installTouchScrollFallback(root);
+        const trackerKey = () => `memory-token-cleaner-tracker:${state.conversationId || "none"}`;
 
         function log(msg) {
           const el = root.querySelector("#mtc-log");
@@ -668,24 +770,55 @@ ${JSON.stringify(records, null, 2)}`;
           render();
         }
 
+        async function loadTracker() {
+          if (!state.conversationId) {
+            state.tracker = { known: {}, cleanedAt: null };
+            return;
+          }
+          const saved = await roche.storage.get(trackerKey());
+          state.tracker = saved && typeof saved === "object" ? { known: saved.known || {}, cleanedAt: saved.cleanedAt || null } : { known: {}, cleanedAt: null };
+        }
+
+        async function saveTracker() {
+          if (!state.conversationId) return;
+          await roche.storage.set(trackerKey(), state.tracker);
+        }
+
+        async function markAllKnown() {
+          const known = {};
+          for (const r of currentRows()) {
+            if (r.id) known[r.id] = r.hash;
+          }
+          state.tracker = { known, cleanedAt: new Date().toISOString() };
+          await saveTracker();
+        }
+
         function currentRows() {
-          return state.facts.map(item => {
-            const id = getMemoryId(item);
+          const known = state.tracker?.known || {};
+          return state.facts.map((item, index) => {
+            const id = getMemoryId(item) || `idx_${index}`;
             const text = getFactText(item);
-            return { id, item, text, analysis: localAnalyzeFact(text, state.settings) };
+            const hash = hashText(text);
+            const oldHash = known[id];
+            const isKnown = oldHash === hash;
+            const isChanged = !!oldHash && oldHash !== hash;
+            const isNew = !oldHash;
+            return { id, item, text, hash, oldHash, isKnown, isChanged, isNew, index, analysis: localAnalyzeFact(text, state.settings), eventTime: extractEventTime(text) };
           });
         }
 
         function stats() {
           const rows = currentRows();
-          const totalTokens = rows.reduce((sum, r) => sum + r.analysis.tokenEstimate, 0);
-          const priority = rows.filter(r => r.analysis.priority && !state.proposals.has(r.id) && !state.verified.has(r.id)).length;
           const proposals = Array.from(state.proposals.values());
-          const actionable = proposals.filter(p => p.action !== "KEEP").length;
-          const needsManual = proposals.filter(p => p.needsManual).length;
-          const keep = proposals.filter(p => p.action === "KEEP").length;
-          const totalProposals = proposals.length;
-          return { rows, totalTokens, flagged: priority, priority, safe: actionable, confirm: needsManual, keep, totalProposals };
+          return {
+            rows,
+            totalTokens: rows.reduce((sum, r) => sum + r.analysis.tokenEstimate, 0),
+            newCount: rows.filter(r => r.isNew || r.isChanged).length,
+            priority: rows.filter(r => r.analysis.priority).length,
+            aiResults: proposals.length,
+            needsManual: proposals.filter(p => p.needsManual).length,
+            actionable: proposals.filter(p => p.action !== "KEEP").length
+          };
         }
 
         async function loadConversations() {
@@ -718,9 +851,7 @@ ${JSON.stringify(records, null, 2)}`;
             }
 
             state.conversations = Array.isArray(list) ? list : [];
-            if (!state.conversationId && state.conversations.length) {
-              state.conversationId = state.conversations[0].id;
-            }
+            if (!state.conversationId && state.conversations.length) state.conversationId = state.conversations[0].id;
           } catch (err) {
             roche.ui.toast("读取会话失败：" + (err?.message || err));
             log("读取会话失败：" + (err?.message || err));
@@ -729,45 +860,39 @@ ${JSON.stringify(records, null, 2)}`;
           }
         }
 
-        async function loadMemory() {
+        async function loadMemory({ silent = false } = {}) {
           if (!state.conversationId) {
             roche.ui.toast("请先选择会话。");
             return;
           }
-          setBusy(true);
+          if (!silent) setBusy(true);
           try {
+            await loadTracker();
             const memory = await roche.memory.getLongTerm({
               conversationId: state.conversationId,
               limit: state.settings.longTermLimit
             });
             state.core = memory?.core || null;
             state.facts = Array.isArray(memory?.facts) ? memory.facts : [];
-            state.vectors = Array.isArray(memory?.vectors) ? memory.vectors : [];
             state.proposals.clear();
-            state.selected.clear();
-            state.verified.clear();
-            log(`已读取长期记忆：facts ${state.facts.length}，vectors ${state.vectors.length}。`);
+            state.showResults = false;
+            log(`已读取事实记忆 ${state.facts.length} 条。`);
           } catch (err) {
             roche.ui.toast("读取记忆失败：" + (err?.message || err));
             log("读取记忆失败：" + (err?.message || err));
           } finally {
-            setBusy(false);
+            if (!silent) setBusy(false);
           }
         }
 
-        function selectedOrFlaggedRows() {
-          const rows = currentRows();
-          if (state.selected.size) return rows.filter(r => state.selected.has(r.id));
-          return rows.filter(r => r.analysis.priority && !state.verified.has(r.id));
-        }
-
-        async function reviewWithAi() {
-          const rows = selectedOrFlaggedRows();
+        async function reviewRows(rows, mode = "review") {
           if (!rows.length) {
-            roche.ui.toast("没有需要审查的记忆。");
+            roche.ui.toast("没有需要处理的记忆。");
             return;
           }
           state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
+          state.reviewMode = mode;
+          state.proposals.clear();
           setBusy(true);
           try {
             let count = 0;
@@ -779,24 +904,40 @@ ${JSON.stringify(records, null, 2)}`;
                 localFlags: r.analysis.flags,
                 localRecommendation: r.analysis.recommendation
               }));
-              log(`AI审查第 ${Math.floor(i / state.settings.batchSize) + 1} 批，共 ${records.length} 条。`);
-              const raw = await askAiForReview(roche, records, state.settings, state.customInstruction, state.reviewMode);
+              log(`AI处理第 ${Math.floor(i / state.settings.batchSize) + 1} 批，共 ${records.length} 条。`);
+              const raw = await askAiForReview(roche, records, state.settings, state.customInstruction, mode);
               const factMap = new Map(currentRows().map(r => [r.id, r]));
-              raw.map(p => normalizeProposal(p, factMap, state.settings, state.reviewMode)).forEach(p => {
+              raw.map(p => normalizeProposal(p, factMap, state.settings, mode)).forEach(p => {
                 state.proposals.set(p.id, p);
                 count++;
               });
             }
-            state.showConfirmPanel = true;
+            state.showResults = true;
             const st = stats();
-            roche.ui.toast(`审查完成：AI建议 ${st.safe}，需处理 ${st.confirm}，建议保留 ${st.keep}。`);
-            log(`审查完成：${count} 条建议。AI建议 ${st.safe}，需处理 ${st.confirm}，建议保留 ${st.keep}。`);
+            roche.ui.toast(`已生成 ${st.aiResults} 条结果，可查看编辑或直接应用。`);
+            log(`AI处理完成：${count} 条结果。`);
           } catch (err) {
-            roche.ui.toast("AI审查失败：" + (err?.message || err));
-            log("AI审查失败：" + (err?.message || err));
+            roche.ui.toast("AI处理失败：" + (err?.message || err));
+            log("AI处理失败：" + (err?.message || err));
           } finally {
             setBusy(false);
           }
+        }
+
+        async function washAll() {
+          await reviewRows(currentRows(), "review");
+        }
+
+        async function cleanNew() {
+          const rows = currentRows().filter(r => r.isNew || r.isChanged);
+          if (!state.tracker?.cleanedAt) {
+            const ok = await roche.ui.confirm({
+              title: "首次清理提示",
+              message: "此角色还没有清理记录，所有事实都会视为新增。确定继续清理新增吗？"
+            });
+            if (!ok) return;
+          }
+          await reviewRows(rows, "review");
         }
 
         async function quickCompressFlagged() {
@@ -805,15 +946,42 @@ ${JSON.stringify(records, null, 2)}`;
             r.analysis.flags.includes("像流水账") ||
             r.analysis.flags.includes("多事件")
           );
+          await reviewRows(rows, "compressOnly");
+        }
+
+        async function archiveOldMemories() {
+          const rows = currentRows()
+            .slice()
+            .sort((a, b) => (a.eventTime - b.eventTime) || (a.index - b.index))
+            .slice(0, Math.max(3, state.settings.archiveCount));
           if (!rows.length) {
-            roche.ui.toast("没有本地识别到需要压缩的记忆。");
+            roche.ui.toast("没有可归档的事实记忆。");
             return;
           }
-          const oldMode = state.reviewMode;
-          state.reviewMode = "compressOnly";
-          state.selected = new Set(rows.map(r => r.id));
-          await reviewWithAi();
-          state.reviewMode = oldMode || "review";
+
+          const ok = await roche.ui.confirm({
+            title: "旧记忆归档",
+            message: `将读取最旧的 ${rows.length} 条事实记忆，生成阶段叙事归档。原记忆不会立刻改变，需点“应用全部结果”后才写回。继续吗？`
+          });
+          if (!ok) return;
+
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
+          state.proposals.clear();
+          setBusy(true);
+          try {
+            const records = rows.map(r => ({ id: r.id, text: r.text }));
+            const raw = await askAi(roche, buildArchivePrompt(records, state.settings, state.customInstruction));
+            const normalized = raw.map(p => normalizeArchiveProposal(p, rows, state.settings)).filter(p => p.sourceIds.length);
+            for (const p of normalized) state.proposals.set(p.id, p);
+            state.showResults = true;
+            roche.ui.toast(`已生成 ${normalized.length} 条归档结果。`);
+            log(`旧记忆归档完成：${normalized.length} 条结果。`);
+          } catch (err) {
+            roche.ui.toast("旧记忆归档失败：" + (err?.message || err));
+            log("旧记忆归档失败：" + (err?.message || err));
+          } finally {
+            setBusy(false);
+          }
         }
 
         async function updateMemory(id, text) {
@@ -822,7 +990,7 @@ ${JSON.stringify(records, null, 2)}`;
             action: text,
             text,
             content: text,
-            source: "plugin_memory_token_cleaner_v2"
+            source: "plugin_memory_token_cleaner_v27"
           });
         }
 
@@ -835,12 +1003,75 @@ ${JSON.stringify(records, null, 2)}`;
             action: text,
             text,
             content: text,
-            source: "plugin_memory_token_cleaner_v2"
+            source: "plugin_memory_token_cleaner_v27"
           });
+        }
+
+        function syncEditedProposal(id) {
+          const p = state.proposals.get(id);
+          if (!p) return p;
+
+          if (p.type === "archive") {
+            const el = root.querySelector(`textarea[data-role="archive"][data-id="${CSS.escape(id)}"]`);
+            if (el) {
+              p.archiveText = el.value.trim();
+              p.keywords = [];
+            }
+            return p;
+          }
+
+          if (p.action === "COMPRESS") {
+            const el = root.querySelector(`textarea[data-role="compress"][data-id="${CSS.escape(id)}"]`);
+            if (el) {
+              p.newText = el.value.trim();
+              p.keywords = [];
+            }
+          }
+
+          if (p.action === "SPLIT") {
+            const boxes = Array.from(root.querySelectorAll(`textarea[data-role="split"][data-id="${CSS.escape(id)}"]`));
+            if (boxes.length) {
+              p.newItems = boxes.map(el => ({ text: el.value.trim(), keywords: [] })).filter(item => item.text);
+            }
+          }
+
+          state.proposals.set(id, p);
+          return p;
+        }
+
+        function syncAllEdited() {
+          Array.from(state.proposals.keys()).forEach(id => syncEditedProposal(id));
         }
 
         async function applyOneProposal(p) {
           if (!p || p.action === "KEEP") return "skip";
+
+          if (p.type === "archive") {
+            const text = finalMemoryText(p.archiveText, p.keywords, state.settings);
+            if (p.action === "DELETE") {
+              for (const id of p.sourceIds) await roche.memory.delete(id);
+              return "delete";
+            }
+            if (p.action === "ARCHIVE_REPLACE" || p.action === "ARCHIVE_KEEP") {
+              if (!text) return "skip";
+              try {
+                await writeMemory(text);
+                if (p.action === "ARCHIVE_REPLACE") {
+                  for (const id of p.sourceIds) await roche.memory.delete(id);
+                }
+                return "archive";
+              } catch (err) {
+                const [first, ...rest] = p.sourceIds;
+                await updateMemory(first, text);
+                if (p.action === "ARCHIVE_REPLACE") {
+                  for (const id of rest) await roche.memory.delete(id);
+                }
+                return "archive-fallback";
+              }
+            }
+            return "skip";
+          }
+
           const original = currentRows().find(r => r.id === p.id);
           if (!original) return "skip";
 
@@ -857,14 +1088,13 @@ ${JSON.stringify(records, null, 2)}`;
           }
 
           if (p.action === "SPLIT") {
-            const items = (p.newItems || []).map(x => finalMemoryText(x, p.keywords, state.settings)).filter(Boolean);
+            const items = (p.newItems || []).map(x => finalMemoryText(x.text || x, x.keywords || [], state.settings)).filter(Boolean);
             if (items.length < 2) return "skip";
             try {
               for (const item of items) await writeMemory(item);
               await roche.memory.delete(p.id);
               return "split";
             } catch (err) {
-              // 如果当前构建不能新建 fact，至少把原条压成多事件短版，避免操作失败。
               await updateMemory(p.id, items.join("\n"));
               return "split-fallback";
             }
@@ -872,39 +1102,8 @@ ${JSON.stringify(records, null, 2)}`;
           return "skip";
         }
 
-        function applyProposalToLocalState(p) {
-          if (!p) return;
-          if (p.action === "DELETE") {
-            state.facts = state.facts.filter(item => getMemoryId(item) !== p.id);
-            state.proposals.delete(p.id);
-            state.selected.delete(p.id);
-            return;
-          }
-
-          if (p.action === "COMPRESS") {
-            const text = finalMemoryText(p.newText, p.keywords, state.settings);
-            const item = state.facts.find(x => getMemoryId(x) === p.id);
-            if (item && text) {
-              item.summaryText = text;
-              item.action = text;
-              item.text = text;
-              item.content = text;
-            }
-            state.proposals.delete(p.id);
-            state.selected.delete(p.id);
-            return;
-          }
-
-          if (p.action === "SPLIT") {
-            state.proposals.delete(p.id);
-            state.selected.delete(p.id);
-          }
-        }
-
-        async function applySafeProposals() {
-          // 先同步人工审查区里用户手动编辑过的内容。
-          Array.from(state.proposals.keys()).forEach(id => syncEditedProposal(id));
-
+        async function applyAllResults() {
+          syncAllEdited();
           const proposals = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP");
           if (!proposals.length) {
             roche.ui.toast("没有可应用的 AI 结果。");
@@ -913,27 +1112,27 @@ ${JSON.stringify(records, null, 2)}`;
 
           const ok = await roche.ui.confirm({
             title: "应用全部结果",
-            message: `将应用 ${proposals.length} 条 AI 结果，包括压缩、拆分或删除。确定继续吗？`
+            message: `将应用 ${proposals.length} 条结果，包括压缩、拆分、删除或归档。确定继续吗？`
           });
           if (!ok) return;
 
           setBusy(true);
           try {
-            const done = { compress:0, delete:0, split:0, skip:0 };
+            const done = { compress:0, delete:0, split:0, archive:0, skip:0 };
             for (const p of proposals) {
               const r = await applyOneProposal(p);
               if (r === "compress") done.compress++;
               else if (r === "delete") done.delete++;
               else if (r.startsWith("split")) done.split++;
+              else if (r.startsWith("archive")) done.archive++;
               else done.skip++;
             }
-            for (const p of proposals) applyProposalToLocalState(p);
-            Array.from(state.proposals.values()).filter(p => p.action === "KEEP").forEach(p => {
-              state.verified.add(p.id);
-              state.proposals.delete(p.id);
-            });
-            roche.ui.toast(`完成：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}。`);
-            log(`已应用全部结果：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}，跳过 ${done.skip}。`);
+            await loadMemory({ silent: true });
+            await markAllKnown();
+            state.proposals.clear();
+            state.showResults = false;
+            roche.ui.toast(`完成：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}。`);
+            log(`已应用全部结果：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}，跳过 ${done.skip}。`);
             render();
           } catch (err) {
             roche.ui.toast("应用失败：" + (err?.message || err));
@@ -943,73 +1142,77 @@ ${JSON.stringify(records, null, 2)}`;
           }
         }
 
-        async function applyConfirmProposal(id) {
-          const p = syncEditedProposal(id);
+        function markKeep(id) {
+          const p = state.proposals.get(id);
           if (!p) return;
-          const ok = await roche.ui.confirm({
-            title: "应用这条结果",
-            message: `将执行 ${p.action}。此操作会写回事实记忆，确定继续吗？`
-          });
-          if (!ok) return;
-          setBusy(true);
-          try {
-            await applyOneProposal(p);
-            applyProposalToLocalState(p);
-            roche.ui.toast("已应用这条。");
-            render();
-          } catch (err) {
-            roche.ui.toast("应用失败：" + (err?.message || err));
-          } finally {
-            setBusy(false);
-          }
-        }
-
-        function keepProposal(id) {
-          state.proposals.delete(id);
-          state.verified.add(id);
+          if (!p._savedOriginal) p._savedOriginal = clonePlain(p);
+          p.action = "KEEP";
+          p._marked = "keep";
+          p.needsManual = false;
+          state.proposals.set(id, p);
           render();
         }
 
-        async function deleteSelected() {
-          const ids = Array.from(state.selected);
-          if (!ids.length) {
-            roche.ui.toast("请先勾选要删除的记忆。");
-            return;
-          }
-          const ok = await roche.ui.confirm({
-            title: "删除事实记忆",
-            message: `将删除 ${ids.length} 条 Roche 主事实记忆。确定继续吗？`
-          });
-          if (!ok) return;
+        function markDelete(id) {
+          const p = state.proposals.get(id);
+          if (!p) return;
+          if (!p._savedOriginal) p._savedOriginal = clonePlain(p);
+          p.action = "DELETE";
+          p._marked = "delete";
+          p.needsManual = false;
+          state.proposals.set(id, p);
+          render();
+        }
+
+        function undoMark(id) {
+          const p = state.proposals.get(id);
+          if (!p) return;
+          if (p._savedOriginal) state.proposals.set(id, p._savedOriginal);
+          else state.proposals.delete(id);
+          render();
+        }
+
+        async function rerunOneAi(id) {
+          const p = state.proposals.get(id);
+          const row = currentRows().find(r => r.id === id);
+          if (!row) return;
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
           setBusy(true);
           try {
-            for (const id of ids) await roche.memory.delete(id);
-            roche.ui.toast(`已删除 ${ids.length} 条。`);
-            await loadMemory();
+            const raw = await askAiForReview(roche, [{
+              id: row.id,
+              text: row.text,
+              localFlags: row.analysis.flags,
+              localRecommendation: row.analysis.recommendation
+            }], state.settings, state.customInstruction, state.reviewMode);
+            const factMap = new Map(currentRows().map(r => [r.id, r]));
+            const next = normalizeProposal(raw[0] || { id, action:"KEEP" }, factMap, state.settings, state.reviewMode);
+            state.proposals.set(id, next);
+            state.showResults = true;
+            roche.ui.toast("已重新生成。");
           } catch (err) {
-            roche.ui.toast("删除失败：" + (err?.message || err));
+            roche.ui.toast("重改失败：" + (err?.message || err));
           } finally {
             setBusy(false);
           }
         }
 
-        async function tryDeleteVectors() {
-          if (!state.vectors.length) return roche.ui.toast("当前没有向量记忆。");
-          const ok = await roche.ui.confirm({
-            title: "尝试删除向量记忆",
-            message: `将尝试删除 ${state.vectors.length} 条向量记忆。如果当前 Roche 不支持，会自动跳过失败项。确定继续吗？`
-          });
-          if (!ok) return;
+        async function convertToSingleCompress(id) {
+          const row = currentRows().find(r => r.id === id);
+          if (!row) return;
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
           setBusy(true);
           try {
-            let done = 0, failed = 0;
-            for (const v of state.vectors) {
-              const id = getMemoryId(v);
-              if (!id) { failed++; continue; }
-              try { await roche.memory.delete(id); done++; } catch (_) { failed++; }
-            }
-            roche.ui.toast(`向量删除尝试完成：成功 ${done}，失败 ${failed}。`);
-            await loadMemory();
+            const raw = await askAiForSingleCompress(roche, row, state.customInstruction);
+            const factMap = new Map(currentRows().map(r => [r.id, r]));
+            const p = normalizeProposal(raw || { id, action:"COMPRESS", newText: simpleCompressText(row.text, state.settings) }, factMap, state.settings, "compressOnly");
+            state.proposals.set(id, p);
+            state.showResults = true;
+            roche.ui.toast("已改为单条压缩。");
+          } catch (err) {
+            const factMap = new Map(currentRows().map(r => [r.id, r]));
+            state.proposals.set(id, normalizeProposal({ id, action:"COMPRESS", newText: simpleCompressText(row.text, state.settings) }, factMap, state.settings, "compressOnly"));
+            roche.ui.toast("AI重写失败，已用本地压缩。");
           } finally {
             setBusy(false);
           }
@@ -1028,6 +1231,7 @@ ${JSON.stringify(records, null, 2)}`;
           next.keywordLimit = Math.max(0, Math.min(8, num("#mtc-keyword-limit", next.keywordLimit)));
           next.batchSize = Math.max(1, Math.min(10, num("#mtc-batch-size", next.batchSize)));
           next.longTermLimit = Math.max(50, Math.min(1000, num("#mtc-long-limit", next.longTermLimit)));
+          next.archiveCount = Math.max(3, Math.min(30, num("#mtc-archive-count", next.archiveCount)));
           state.settings = next;
           await saveSettings(roche, next);
           roche.ui.toast("设置已保存。");
@@ -1061,108 +1265,115 @@ ${JSON.stringify(records, null, 2)}`;
           `;
         }
 
-        function proposalBadge(p) {
-          if (!p || p.action === "KEEP") return "";
-          const cls = p.action === "DELETE" ? "danger" : (p.risk === "confirm" ? "confirm" : "warn");
-          return `<span class="mtc-badge ${cls}">${escapeHtml(p.action)}${p.risk === "confirm" ? " 待确认" : ""}</span>`;
+        function actionBadge(p) {
+          if (!p) return "";
+          const act = p._marked === "keep" ? "标记保留" : (p._marked === "delete" ? "标记删除" : p.action);
+          const cls = p.action === "DELETE" || p._marked === "delete" ? "danger" : (p.needsManual ? "confirm" : "warn");
+          return `<span class="mtc-badge ${cls}">${escapeHtml(act)}</span>`;
         }
 
-        function renderProposal(p) {
-          if (!p || p.action === "KEEP") return "";
-          const splitItems = (p.newItems || []).map((x, i) => `<div class="mtc-text">${i + 1}. ${escapeHtml(finalMemoryText(x, p.keywords, state.settings))}</div>`).join("");
+        function renderArchiveProposal(p, factMap) {
+          const sourceText = (p.sourceIds || []).map(id => factMap.get(id)?.text).filter(Boolean);
           return `
-            <div class="mtc-proposal">
+            <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
               <div class="mtc-badges">
-                ${proposalBadge(p)}
+                ${actionBadge(p)}
+                <span class="mtc-badge">来源 ${p.sourceIds.length} 条</span>
                 ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
-                ${p.keywords?.length ? `<span class="mtc-badge">${escapeHtml(p.keywords.join(" / "))}</span>` : ""}
               </div>
-              ${p.action === "COMPRESS" ? `<div class="mtc-text" style="margin-top:6px">${escapeHtml(finalMemoryText(p.newText, p.keywords, state.settings))}</div>` : ""}
-              ${p.action === "SPLIT" ? `<div style="margin-top:6px">${splitItems}</div>` : ""}
+              <details style="margin-top:8px">
+                <summary class="mtc-muted">原记忆组</summary>
+                ${sourceText.map((t, i) => `<div class="mtc-text" style="margin-top:6px">${i + 1}. ${escapeHtml(t)}</div>`).join("")}
+              </details>
+              ${p.action === "DELETE" ? `<div class="mtc-proposal"><div class="mtc-text">已标记删除这些旧记忆。</div></div>` : `
+                <div class="mtc-muted" style="margin-top:8px">归档记忆，可编辑</div>
+                <textarea class="mtc-edit-text" data-role="archive" data-id="${escapeHtml(p.id)}">${escapeHtml(finalMemoryText(p.archiveText, p.keywords, state.settings))}</textarea>
+              `}
+              ${renderCardActions(p)}
             </div>
           `;
         }
 
-        function renderFact(r) {
-          const p = state.proposals.get(r.id);
-          const recClass = r.analysis.recommendation === "DELETE" ? "danger" : (r.analysis.recommendation === "COMPRESS" ? "warn" : "");
-          const flags = r.analysis.flags.map(f => `<span class="mtc-badge warn">${escapeHtml(f)}</span>`).join("");
+        function renderFactProposal(p, factMap) {
+          const original = factMap.get(p.id)?.text || "";
+          const isKeep = p.action === "KEEP";
+          const splitBlocks = p.action === "SPLIT" ? (p.newItems || []).map((item, i) => `
+            <div class="mtc-split-box">
+              <div class="mtc-muted">新记忆 ${i + 1}</div>
+              <textarea class="mtc-edit-text" data-role="split" data-id="${escapeHtml(p.id)}" data-index="${i}">${escapeHtml(finalMemoryText(item.text, item.keywords, state.settings))}</textarea>
+            </div>
+          `).join("") : "";
+
           return `
-            <div class="mtc-fact" data-id="${escapeHtml(r.id)}">
-              <div class="mtc-row" style="justify-content:space-between">
-                <div class="mtc-row" style="gap:6px">
-                  <span class="mtc-badge ${recClass}">${escapeHtml(r.analysis.recommendation)}</span>
-                  <span class="mtc-badge">${r.analysis.len}字</span>
-                  <span class="mtc-badge">~${r.analysis.tokenEstimate}tok</span>
-                </div>
+            <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+              <div class="mtc-badges">
+                ${actionBadge(p)}
+                ${isKeep ? `<span class="mtc-badge">KEEP</span>` : ""}
+                ${p.needsManual ? `<span class="mtc-badge confirm">需处理</span>` : ""}
+                ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
               </div>
-              <div class="mtc-badges" style="margin-top:6px">${flags}</div>
-              <div class="mtc-text" style="margin-top:8px">${escapeHtml(r.text)}</div>
-              ${renderProposal(p)}
+              <details style="margin-top:8px">
+                <summary class="mtc-muted">原记忆</summary>
+                <div class="mtc-text">${escapeHtml(original)}</div>
+              </details>
+              ${p.action === "COMPRESS" ? `
+                <div class="mtc-muted" style="margin-top:8px">AI改后，可编辑</div>
+                <textarea class="mtc-edit-text" data-role="compress" data-id="${escapeHtml(p.id)}">${escapeHtml(finalMemoryText(p.newText, p.keywords, state.settings))}</textarea>
+              ` : ""}
+              ${p.action === "SPLIT" ? `
+                <div class="mtc-muted" style="margin-top:8px">拆分为 ${p.newItems.length} 条，可分别编辑</div>
+                ${splitBlocks}
+              ` : ""}
+              ${p.action === "DELETE" ? `<div class="mtc-proposal"><div class="mtc-text">已标记删除这条记忆。</div></div>` : ""}
+              ${renderCardActions(p)}
             </div>
           `;
         }
 
-        function renderConfirmPanel() {
+        function renderCardActions(p) {
+          const id = escapeHtml(p.id);
+          const isArchive = p.type === "archive";
+          const canCompress = !isArchive && (p.action === "SPLIT" || p.action === "DELETE");
+          return `
+            <div class="mtc-row" style="margin-top:8px">
+              ${!isArchive ? `<button type="button" data-action="rerun" data-id="${id}">让AI重改</button>` : ""}
+              ${canCompress ? `<button type="button" data-action="single-compress" data-id="${id}">改为单条压缩</button>` : ""}
+              <button type="button" data-action="mark-keep" data-id="${id}">保留原文</button>
+              <button type="button" class="danger" data-action="mark-delete" data-id="${id}">删除这条</button>
+              ${p._marked ? `<button type="button" data-action="undo" data-id="${id}">撤销</button>` : ""}
+            </div>
+          `;
+        }
+
+        function renderResultsPanel() {
           const all = Array.from(state.proposals.values());
-          if (!state.showConfirmPanel || !all.length) return "";
+          if (!state.showResults || !all.length) return "";
           const factMap = new Map(currentRows().map(r => [r.id, r]));
+          const needs = all.filter(p => p.action !== "KEEP" && p.needsManual);
+          const changed = all.filter(p => p.action !== "KEEP" && !p.needsManual);
+          const keep = all.filter(p => p.action === "KEEP");
 
           const group = (title, items) => {
             if (!items.length) return "";
             return `
               <div class="mtc-mini-title">${escapeHtml(title)} ${items.length} 条</div>
-              ${items.map(p => {
-                const original = factMap.get(p.id)?.text || "";
-                const isKeep = p.action === "KEEP";
-                const editValue =
-                  p.action === "COMPRESS" ? finalMemoryText(p.newText, p.keywords, state.settings) :
-                  p.action === "SPLIT" ? (p.newItems || []).map(x => finalMemoryText(x, p.keywords, state.settings)).join("\\n---\\n") :
-                  "";
-
-                return `
-                  <div class="mtc-fact">
-                    <div class="mtc-badges">
-                      ${proposalBadge(p)}
-                      ${isKeep ? `<span class="mtc-badge">KEEP</span>` : ""}
-                      ${p.needsManual ? `<span class="mtc-badge confirm">需处理</span>` : ""}
-                      ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
-                    </div>
-                    <details>
-                      <summary class="mtc-muted" style="margin-top:8px">原记忆</summary>
-                      <div class="mtc-text">${escapeHtml(original)}</div>
-                    </details>
-                    ${!isKeep && p.action !== "DELETE" ? `
-                      <div class="mtc-muted" style="margin-top:8px">AI改后，可直接手动编辑</div>
-                      <textarea class="mtc-edit-text" data-id="${escapeHtml(p.id)}">${escapeHtml(editValue)}</textarea>
-                    ` : ""}
-                    ${p.action === "DELETE" ? `<div class="mtc-proposal"><div class="mtc-text">AI 建议删除这条记忆。</div></div>` : ""}
-                    <div class="mtc-row" style="margin-top:8px">
-                      ${!isKeep ? `<button class="primary mtc-apply-confirm" data-id="${escapeHtml(p.id)}">应用这条</button>` : ""}
-                      ${!isKeep ? `<button class="mtc-rerun-ai" data-id="${escapeHtml(p.id)}">让AI重改</button>` : ""}
-                      <button class="mtc-keep-proposal" data-id="${escapeHtml(p.id)}">${isKeep ? "确认保留" : "保留原文"}</button>
-                      <button class="danger mtc-delete-one" data-id="${escapeHtml(p.id)}">删除这条</button>
-                    </div>
-                  </div>
-                `;
-              }).join("")}
+              ${items.map(p => p.type === "archive" ? renderArchiveProposal(p, factMap) : renderFactProposal(p, factMap)).join("")}
             `;
           };
-
-          const needs = all.filter(p => p.action !== "KEEP" && p.needsManual);
-          const changed = all.filter(p => p.action !== "KEEP" && !p.needsManual);
-          const keep = all.filter(p => p.action === "KEEP");
 
           return `
             <div class="mtc-card">
               <div style="font-weight:700;margin-bottom:8px">查看/编辑结果</div>
-              <div class="mtc-muted">这里不是强制人工审。你可以直接点“应用全部结果”，也可以只编辑不满意的 AI 改后内容，或让 AI 重改单条。</div>
-              <div class="mtc-row" style="margin-top:8px">
-                <button class="primary" id="mtc-apply-all-results-top">应用当前全部结果</button>
-              </div>
+              <div class="mtc-muted">这里不会立刻写回记忆。你可以编辑、重改、标记保留或删除，最后点底部“应用全部结果”。</div>
               ${group("需处理", needs)}
               ${group("AI已修改", changed)}
               ${group("建议保留", keep)}
+              <div class="mtc-row" style="margin-top:12px">
+                <button type="button" class="mtc-action act-apply" data-action="apply-all">
+                  <b>应用全部结果</b>
+                  <span>把当前 AI 结果和你手动编辑过的内容写回事实记忆。</span>
+                </button>
+              </div>
             </div>
           `;
         }
@@ -1179,19 +1390,19 @@ ${JSON.stringify(records, null, 2)}`;
 
           root.innerHTML = `
             <div class="mtc-top">
-              <button id="mtc-back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2.6</div>
+              <button type="button" data-action="back">返回</button>
+              <div class="mtc-title">记忆低Token清理器 v2.7</div>
             </div>
 
             <div class="mtc-card">
               <div class="mtc-row">
                 <select id="mtc-conversation">${convOptions || `<option value="">未读取会话</option>`}</select>
-                <button id="mtc-load-conv" ${disabled}>刷新会话</button>
-                <button id="mtc-load-memory" class="primary" ${disabled}>读取记忆</button>
+                <button type="button" data-action="load-conv" ${disabled}>刷新会话</button>
+                <button type="button" data-action="load-memory" class="act-apply" ${disabled}>读取记忆</button>
               </div>
               <div class="mtc-row" style="margin-top:8px">
                 <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1;min-width:220px">
-                <button id="mtc-use-manual-conv" ${disabled}>使用这个ID</button>
+                <button type="button" data-action="use-manual-conv" ${disabled}>使用这个ID</button>
               </div>
               <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。</div>
             </div>
@@ -1199,39 +1410,51 @@ ${JSON.stringify(records, null, 2)}`;
             <div class="mtc-card">
               <div class="mtc-stats">
                 <div class="mtc-stat"><b>${state.facts.length}</b><span>事实记忆</span></div>
+                <div class="mtc-stat"><b>${s.newCount}</b><span>新增/变动</span></div>
                 <div class="mtc-stat"><b>${s.priority}</b><span>优先清理</span></div>
-                <div class="mtc-stat"><b>${s.totalTokens}</b><span>事实估算token</span></div>
-                <div class="mtc-stat"><b>${s.safe}</b><span>AI建议</span></div>
-                <div class="mtc-stat"><b>${s.confirm}</b><span>需处理</span></div>
-                <div class="mtc-stat"><b>${s.keep}</b><span>建议保留</span></div>
-                <div class="mtc-stat"><b>${s.totalProposals}</b><span>审查结果</span></div>
+                <div class="mtc-stat"><b>${s.totalTokens}</b><span>估算token</span></div>
+                <div class="mtc-stat"><b>${s.aiResults}</b><span>AI结果</span></div>
+                <div class="mtc-stat"><b>${s.needsManual}</b><span>需处理</span></div>
               </div>
             </div>
 
             <div class="mtc-card">
-              <div class="mtc-row">
-                <button id="mtc-ai-review" class="primary" ${disabled}>大清洗</button>
-                <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
-                <button id="mtc-toggle-custom-instruction" class="success" ${disabled}>审查补充要求</button>
-                <button id="mtc-toggle-confirm" ${disabled}>查看/编辑结果${s.totalProposals ? `(${s.totalProposals})` : ""}</button>
-                <button id="mtc-apply-safe" class="primary" ${disabled}>应用全部结果${s.safe ? `(${s.safe})` : ""}</button>
+              <div class="mtc-action-grid">
+                <button type="button" class="mtc-action act-new" data-action="clean-new" ${disabled}>
+                  <b>清理新增</b><span>日常维护，处理上次清理后新增或变动的事实记忆。</span>
+                </button>
+                <button type="button" class="mtc-action act-compress" data-action="quick-compress" ${disabled}>
+                  <b>压缩过长/流水账</b><span>只整理过长或流水账，偏保守，不主动删除。</span>
+                </button>
+                <button type="button" class="mtc-action act-wash" data-action="wash-all" ${disabled}>
+                  <b>大清洗</b><span>全库扫描，动作最重，可能保留、压缩、拆分或删除。</span>
+                </button>
+                <button type="button" class="mtc-action act-archive" data-action="archive-old" ${disabled}>
+                  <b>旧记忆归档</b><span>记忆减退，把旧记忆合并成阶段叙事，属于特殊整理。</span>
+                </button>
+                <button type="button" class="mtc-action act-prompt" data-action="toggle-prompt" ${disabled}>
+                  <b>新增提示词</b><span>给本次 AI 操作加临时要求，不写入记忆。</span>
+                </button>
+                <button type="button" class="mtc-action act-review" data-action="toggle-results" ${disabled}>
+                  <b>查看/编辑结果${s.aiResults ? `（${s.aiResults}）` : ""}</b><span>查看 AI 方案，手动编辑、重改、标记删除或保留。</span>
+                </button>
+                <button type="button" class="mtc-action act-apply" data-action="apply-all" ${disabled}>
+                  <b>应用全部结果${s.actionable ? `（${s.actionable}）` : ""}</b><span>真正写回事实记忆，属于最终提交。</span>
+                </button>
               </div>
-              <div id="mtc-custom-instruction-panel" class="mtc-custom-panel ${state.showCustomInstruction ? "" : "hidden"}" style="margin-top:10px">
-                <div style="font-weight:700; margin-bottom:8px">本次 AI 审查补充要求</div>
+
+              <div id="mtc-custom-instruction-panel" class="${state.showPrompt ? "" : "hidden"}" style="margin-top:10px">
+                <div style="font-weight:700; margin-bottom:8px">新增提示词</div>
                 <textarea id="mtc-custom-instruction" placeholder="例：保留地点；注意时间顺序；只压缩不删除；保留未完成承诺。">${escapeHtml(state.customInstruction || "")}</textarea>
-                <div class="mtc-field-note">仅影响本次 AI 审查。</div>
+                <div class="mtc-field-note">仅影响本次会调用 AI 的记忆处理。</div>
               </div>
+
               <div class="mtc-muted" style="margin-top:8px;line-height:1.55">
-                建议最新事实注入上限设为 3～5。<br>
-                大清洗：扫描优先清理项，让 AI 判断保留、压缩、拆分或删除。<br>
-                压缩过长/流水账：只整理过长记忆，偏保守，不主动删除。<br>
-                审查补充要求：给本次 AI 审查临时加要求，例如保留地点、只压缩不删除。<br>
-                查看/编辑结果：查看 AI 改后的内容，可手动改、重改、删除或保留。<br>
-                应用全部结果：把当前 AI 审查结果一次性写回事实记忆。
+                建议最新事实注入上限设为 3～5。
               </div>
             </div>
 
-            ${renderConfirmPanel()}
+            ${renderResultsPanel()}
 
             <details class="mtc-card">
               <summary>设置</summary>
@@ -1243,6 +1466,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <label>关键词数量上限</label><input id="mtc-keyword-limit" type="number" value="${state.settings.keywordLimit}">
                 <label>AI批量审查条数</label><input id="mtc-batch-size" type="number" value="${state.settings.batchSize}">
                 <label>读取长期记忆上限</label><input id="mtc-long-limit" type="number" value="${state.settings.longTermLimit}">
+                <label>旧记忆归档条数</label><input id="mtc-archive-count" type="number" value="${state.settings.archiveCount}">
               </div>
 
               <details style="margin-top:12px">
@@ -1250,14 +1474,13 @@ ${JSON.stringify(records, null, 2)}`;
                 <div style="margin-top:8px">
                   ${renderSwitchRow("executeAllAiSuggestions", "全部执行AI建议", state.settings.executeAllAiSuggestions)}
                   ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
-                  ${renderSwitchRow("autoApplySafeCompress", "压缩建议可自动应用", state.settings.autoApplySafeCompress)}
                   ${renderSwitchRow("showCore", "显示Core Memory", state.settings.showCore)}
                 </div>
               </details>
 
               <div class="mtc-row" style="margin-top:10px">
-                <button id="mtc-save-settings" ${disabled}>保存设置</button>
-                <button id="mtc-restore-defaults" class="danger" ${disabled}>恢复默认</button>
+                <button type="button" data-action="save-settings" ${disabled}>保存设置</button>
+                <button type="button" data-action="restore-defaults" class="danger" ${disabled}>恢复默认</button>
               </div>
             </details>
 
@@ -1267,10 +1490,10 @@ ${JSON.stringify(records, null, 2)}`;
                 <div class="mtc-text" style="margin-top:8px">${escapeHtml(state.core?.summary || state.core?.text || JSON.stringify(state.core || {}, null, 2))}</div>
               </details>` : ""}
 
-
             <div class="mtc-card">
               <div class="mtc-muted">
-                已读取 ${state.facts.length} 条事实记忆。原始记忆不会在主界面展开；需要修改时请先点“大清洗”或“压缩过长/流水账”，再进入“查看/编辑结果”。
+                已读取 ${state.facts.length} 条事实记忆。原始记忆不会在主界面展开；需要修改时请先生成 AI 结果，再进入“查看/编辑结果”。
+                ${state.tracker?.cleanedAt ? `<br>上次记录：${escapeHtml(new Date(state.tracker.cleanedAt).toLocaleString())}` : "<br>此角色暂无清理记录；首次清理时会把当前事实视作新增。"}
               </div>
             </div>
 
@@ -1278,58 +1501,87 @@ ${JSON.stringify(records, null, 2)}`;
             <div class="mtc-bottom-spacer"></div>
           `;
 
-          // Safety cleanup: raw fact/debug lists are not part of the v2.6 front-end flow.
-          root.querySelectorAll(".mtc-list").forEach(el => el.remove());
           bindEvents();
         }
 
         function bindEvents() {
-          root.querySelector("#mtc-back")?.addEventListener("click", () => roche.ui.closeApp());
-          root.querySelector("#mtc-load-conv")?.addEventListener("click", loadConversations);
-          root.querySelector("#mtc-load-memory")?.addEventListener("click", loadMemory);
-          root.querySelector("#mtc-use-manual-conv")?.addEventListener("click", () => {
-            const manual = String(root.querySelector("#mtc-manual-conversation-id")?.value || "").trim();
-            if (!manual) return roche.ui.toast("请先粘贴 conversationId。");
-            state.conversationId = manual;
-            state.facts = []; state.vectors = []; state.core = null; state.proposals.clear(); state.selected.clear(); state.verified.clear();
-            render();
+          if (root.__mtcBound) return;
+          root.__mtcBound = true;
+
+          root.addEventListener("input", e => {
+            if (e.target?.id === "mtc-custom-instruction") state.customInstruction = e.target.value;
           });
-          root.querySelector("#mtc-conversation")?.addEventListener("change", e => {
-            state.conversationId = e.target.value;
-            state.facts = []; state.vectors = []; state.core = null; state.proposals.clear(); state.selected.clear(); state.verified.clear();
-            render();
+
+          root.addEventListener("change", e => {
+            if (e.target?.id === "mtc-conversation") {
+              state.conversationId = e.target.value;
+              state.facts = [];
+              state.core = null;
+              state.proposals.clear();
+              state.tracker = { known: {}, cleanedAt: null };
+              render();
+            }
           });
-          root.querySelector("#mtc-custom-instruction")?.addEventListener("input", e => state.customInstruction = e.target.value);
-          root.querySelector("#mtc-ai-review")?.addEventListener("click", () => { state.reviewMode = "review"; reviewWithAi(); });
-          root.querySelector("#mtc-quick-compress")?.addEventListener("click", quickCompressFlagged);
-          root.querySelector("#mtc-apply-safe")?.addEventListener("click", applySafeProposals);
-          root.querySelector("#mtc-apply-all-results-top")?.addEventListener("click", applySafeProposals);
-          root.querySelector("#mtc-toggle-confirm")?.addEventListener("click", () => { state.showConfirmPanel = !state.showConfirmPanel; render(); });
-          root.querySelector("#mtc-toggle-custom-instruction")?.addEventListener("click", () => {
-            state.showCustomInstruction = !state.showCustomInstruction;
-            const panel = root.querySelector("#mtc-custom-instruction-panel");
-            if (panel) panel.classList.toggle("hidden", !state.showCustomInstruction);
+
+          root.addEventListener("click", async e => {
+            const btn = e.target.closest("button[data-action], .mtc-switch-button");
+            if (!btn || !root.contains(btn)) return;
+            e.preventDefault();
+            e.stopPropagation();
+
+            if (btn.classList.contains("mtc-switch-button")) {
+              const key = btn.dataset.settingKey;
+              if (!key || !(key in state.settings)) return;
+              state.settings[key] = !state.settings[key];
+              const value = !!state.settings[key];
+              btn.classList.toggle("on", value);
+              btn.setAttribute("aria-pressed", value ? "true" : "false");
+              const pill = btn.querySelector(".mtc-switch-pill");
+              if (pill) pill.textContent = value ? "开" : "关";
+              return;
+            }
+
+            const action = btn.dataset.action;
+            const id = btn.dataset.id;
+
+            if (action === "back") return roche.ui.closeApp();
+            if (action === "load-conv") return loadConversations();
+            if (action === "load-memory") return loadMemory();
+            if (action === "use-manual-conv") {
+              const manual = String(root.querySelector("#mtc-manual-conversation-id")?.value || "").trim();
+              if (!manual) return roche.ui.toast("请先粘贴 conversationId。");
+              state.conversationId = manual;
+              state.facts = [];
+              state.core = null;
+              state.proposals.clear();
+              state.tracker = { known: {}, cleanedAt: null };
+              return render();
+            }
+            if (action === "clean-new") return cleanNew();
+            if (action === "wash-all") return washAll();
+            if (action === "quick-compress") return quickCompressFlagged();
+            if (action === "archive-old") return archiveOldMemories();
+            if (action === "toggle-prompt") {
+              state.showPrompt = !state.showPrompt;
+              return render();
+            }
+            if (action === "toggle-results") {
+              state.showResults = !state.showResults;
+              return render();
+            }
+            if (action === "apply-all") return applyAllResults();
+            if (action === "save-settings") return saveSettingsFromUi();
+            if (action === "restore-defaults") return restoreDefaultSettings();
+            if (action === "rerun") return rerunOneAi(id);
+            if (action === "single-compress") return convertToSingleCompress(id);
+            if (action === "mark-keep") return markKeep(id);
+            if (action === "mark-delete") return markDelete(id);
+            if (action === "undo") return undoMark(id);
           });
-          root.querySelector("#mtc-save-settings")?.addEventListener("click", saveSettingsFromUi);
-          root.querySelector("#mtc-restore-defaults")?.addEventListener("click", restoreDefaultSettings);
-          root.querySelectorAll(".mtc-switch-button").forEach(btn => btn.addEventListener("click", () => {
-            const key = btn.dataset.settingKey;
-            if (!key || !(key in state.settings)) return;
-            state.settings[key] = !state.settings[key];
-            const value = !!state.settings[key];
-            btn.classList.toggle("on", value);
-            btn.setAttribute("aria-pressed", value ? "true" : "false");
-            const pill = btn.querySelector(".mtc-switch-pill");
-            if (pill) pill.textContent = value ? "开" : "关";
-          }));
-          root.querySelectorAll(".mtc-apply-confirm").forEach(btn => btn.addEventListener("click", () => applyConfirmProposal(btn.dataset.id)));
-          root.querySelectorAll(".mtc-rerun-ai").forEach(btn => btn.addEventListener("click", () => rerunOneAi(btn.dataset.id)));
-          root.querySelectorAll(".mtc-delete-one").forEach(btn => btn.addEventListener("click", () => deleteOneFact(btn.dataset.id)));
-          root.querySelectorAll(".mtc-keep-proposal").forEach(btn => btn.addEventListener("click", () => keepProposal(btn.dataset.id)));
         }
 
         await loadConversations();
-        if (state.conversationId) await loadMemory();
+        if (state.conversationId) await loadMemory({ silent: true });
         render();
 
         container.__memoryTokenCleanerUnmount = () => {
@@ -1338,8 +1590,6 @@ ${JSON.stringify(records, null, 2)}`;
           container.style.height = previous.height;
           container.style.minHeight = previous.minHeight;
           container.style.position = previous.position;
-          container.style.touchAction = previous.touchAction;
-          container.style.webkitOverflowScrolling = previous.webkitOverflowScrolling;
         };
       },
       async unmount(container) {
