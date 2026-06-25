@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.4.0";
+  const VERSION = "2.5.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -16,7 +16,7 @@
     writeKeywords: true,
     autoApplySafeCompress: false,
     showCore: false,
-    showVectors: true,
+    showVectors: false,
     executeAllAiSuggestions: false
   };
 
@@ -1181,7 +1181,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button id="mtc-back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2.4.4.3</div>
+              <div class="mtc-title">记忆低Token清理器 v2.5.4.3</div>
             </div>
 
             <div class="mtc-card">
@@ -1280,7 +1280,11 @@ ${JSON.stringify(records, null, 2)}`;
               </div>` : ""}
 
 
-            <div class="mtc-list">${s.rows.map(r => renderFact(r)).join("") || `<div class="mtc-card mtc-muted">暂无事实记忆。请先读取会话记忆。</div>`}</div>
+            <div class="mtc-card">
+              <div class="mtc-muted">
+                已读取 ${state.facts.length} 条事实记忆。原始记忆不会在主界面展开；需要修改时请先点“大清洗”或“压缩过长/流水账”，再进入“查看/编辑结果”。
+              </div>
+            </div>
 
             <div class="mtc-card"><div class="mtc-log" id="mtc-log"></div></div>
             <div class="mtc-bottom-spacer"></div>
