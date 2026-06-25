@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "1.0.7";
+  const VERSION = "1.0.8";
 
   const DEFAULT_SETTINGS = {
     maxChars: 70,
@@ -588,6 +588,27 @@ ${JSON.stringify(records, null, 2)}`;
         background: var(--mtc-danger-bg) !important;
         border-color: var(--mtc-danger-border) !important;
       }
+      .roche-plugin-memory-token-cleaner button.success {
+        background: #dff7e8 !important;
+        border-color: #9fddb8 !important;
+        color: var(--mtc-text) !important;
+      }
+      @media (prefers-color-scheme: dark) {
+        .roche-plugin-memory-token-cleaner button.success {
+          background: rgba(70,190,120,.22) !important;
+          border-color: rgba(110,220,150,.45) !important;
+        }
+      }
+      .roche-plugin-memory-token-cleaner .mtc-custom-panel {
+        margin-top: 10px;
+        padding: 10px;
+        border-radius: 14px;
+        border: 1px solid var(--mtc-border-color, rgba(31,35,40,.13));
+        background: var(--mtc-card-bg, #fff);
+      }
+      .roche-plugin-memory-token-cleaner .mtc-custom-panel.hidden {
+        display: none;
+      }
       .roche-plugin-memory-token-cleaner .mtc-card,
       .roche-plugin-memory-token-cleaner .mtc-fact {
         background: var(--mtc-card-bg) !important;
@@ -639,6 +660,7 @@ ${JSON.stringify(records, null, 2)}`;
             selected: new Set(),
             customInstruction: "",
             reviewMode: "review",
+            showCustomInstruction: false,
             busy: false
           };
 
@@ -1010,6 +1032,26 @@ ${JSON.stringify(records, null, 2)}`;
             render();
           }
 
+          async function restoreDefaultSettings() {
+            const first = await roche.ui.confirm({
+              title: "恢复默认设置",
+              message: "将恢复插件初始参数与高级开关。当前会话记忆不会被修改。"
+            });
+            if (!first) return;
+
+            const second = await roche.ui.confirm({
+              title: "再次确认",
+              message: "确定恢复默认设置吗？此操作只影响插件设置。"
+            });
+            if (!second) return;
+
+            state.settings = { ...DEFAULT_SETTINGS };
+            state.customInstruction = "";
+            await saveSettings(roche, state.settings);
+            roche.ui.toast("已恢复默认设置。");
+            render();
+          }
+
           function renderSwitchRow(key, label, value) {
             return `
               <button type="button" class="mtc-switch-button ${value ? "on" : ""}" data-setting-key="${escapeHtml(key)}" aria-pressed="${value ? "true" : "false"}">
@@ -1066,9 +1108,15 @@ ${JSON.stringify(records, null, 2)}`;
                   <button id="mtc-ai-review" class="primary" ${disabled}>AI审查疑似记忆</button>
                   <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
                   <button id="mtc-apply" class="primary" ${disabled}>应用建议 ${proposalCount ? `(${proposalCount})` : ""}</button>
+                  <button id="mtc-toggle-custom-instruction" class="success" ${disabled}>审查补充要求</button>
                   <button id="mtc-delete-selected" class="danger" ${disabled}>删除勾选</button>
                   <button id="mtc-scroll-top" ${disabled}>回到顶部</button>
                   <button id="mtc-scroll-bottom" ${disabled}>到底部</button>
+                </div>
+                <div id="mtc-custom-instruction-panel" class="mtc-custom-panel ${state.showCustomInstruction ? "" : "hidden"}">
+                  <div style="font-weight:700; margin-bottom:8px">本次 AI 审查补充要求</div>
+                  <textarea id="mtc-custom-instruction" placeholder="例：保留地点；注意时间顺序；只压缩不删除；保留未完成承诺。">${escapeHtml(state.customInstruction || "")}</textarea>
+                  <div class="mtc-field-note">仅影响本次 AI 审查。</div>
                 </div>
                 <div class="mtc-muted" style="margin-top:8px">
                   建议：Roche“最新事实注入上限”设为 3～5；本插件负责把主事实记忆压短、去重、关键词化。
@@ -1089,12 +1137,6 @@ ${JSON.stringify(records, null, 2)}`;
                 <details style="margin-top:12px">
                   <summary>高级开关</summary>
 
-                  <details style="margin-top:10px">
-                    <summary>本次审查补充要求</summary>
-                    <textarea id="mtc-custom-instruction" placeholder="例：保留地点；注意时间顺序；只压缩不删除；保留未完成承诺。">${escapeHtml(state.customInstruction || "")}</textarea>
-                    <div class="mtc-field-note">仅影响本次 AI 审查。</div>
-                  </details>
-
                   <div style="margin-top:8px">
                     ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
                     ${renderSwitchRow("strictMode", "严格低Token模式", state.settings.strictMode)}
@@ -1104,7 +1146,10 @@ ${JSON.stringify(records, null, 2)}`;
                   </div>
                 </details>
 
-                <div style="margin-top:10px"><button id="mtc-save-settings" ${disabled}>保存设置</button></div>
+                <div class="mtc-row" style="margin-top:10px">
+                  <button id="mtc-save-settings" ${disabled}>保存设置</button>
+                  <button id="mtc-restore-defaults" class="danger" ${disabled}>恢复默认</button>
+                </div>
               </details>
 
               ${state.settings.showCore ? `
@@ -1211,16 +1256,30 @@ ${JSON.stringify(records, null, 2)}`;
                 const key = btn.dataset.settingKey;
                 if (!key || !(key in state.settings)) return;
                 state.settings[key] = !state.settings[key];
-                render();
+
+                const value = !!state.settings[key];
+                btn.classList.toggle("on", value);
+                btn.setAttribute("aria-pressed", value ? "true" : "false");
+                const pill = btn.querySelector(".mtc-switch-pill");
+                if (pill) pill.textContent = value ? "开" : "关";
               });
             });
             root.querySelector("#mtc-ai-review")?.addEventListener("click", () => { state.reviewMode = "review"; reviewWithAi(); });
             root.querySelector("#mtc-quick-compress")?.addEventListener("click", quickCompressFlagged);
             root.querySelector("#mtc-apply")?.addEventListener("click", applyProposals);
+            root.querySelector("#mtc-toggle-custom-instruction")?.addEventListener("click", () => {
+              state.showCustomInstruction = !state.showCustomInstruction;
+              const panel = root.querySelector("#mtc-custom-instruction-panel");
+              if (panel) panel.classList.toggle("hidden", !state.showCustomInstruction);
+              if (state.showCustomInstruction) {
+                setTimeout(() => root.querySelector("#mtc-custom-instruction")?.focus?.(), 50);
+              }
+            });
             root.querySelector("#mtc-delete-selected")?.addEventListener("click", deleteSelected);
             root.querySelector("#mtc-scroll-top")?.addEventListener("click", () => root.scrollTo({ top: 0, behavior: "smooth" }));
             root.querySelector("#mtc-scroll-bottom")?.addEventListener("click", () => root.scrollTo({ top: root.scrollHeight, behavior: "smooth" }));
             root.querySelector("#mtc-save-settings")?.addEventListener("click", saveSettingsFromUi);
+            root.querySelector("#mtc-restore-defaults")?.addEventListener("click", restoreDefaultSettings);
             root.querySelector("#mtc-delete-vectors")?.addEventListener("click", tryDeleteVectors);
             root.querySelector("#mtc-select-flagged")?.addEventListener("click", () => {
               currentFactsWithAnalysis().forEach(r => {
