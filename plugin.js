@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.4.0";
+  const VERSION = "3.4.1";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -784,7 +784,17 @@ ${JSON.stringify(records, null, 2)}`;
 
     const original = factMap.get(id)?.text || (sourceIds.map(sid => factMap.get(sid)?.text).filter(Boolean).join("\n"));
     const keywords = unique(p?.keywords || []).slice(0, settings.keywordLimit);
-    let newText = String(p?.newText || p?.mergeText || p?.text || "").trim();
+    let newText = String(
+      p?.newText ||
+      p?.mergeText ||
+      p?.mergedText ||
+      p?.what ||
+      p?.summaryText ||
+      p?.content ||
+      p?.archiveText ||
+      p?.text ||
+      ""
+    ).trim();
     let newItems = normalizeSplitItems(p?.newItems, keywords);
     let reason = String(p?.reason || "").trim().slice(0, 40);
 
@@ -860,7 +870,7 @@ ${JSON.stringify(records, null, 2)}`;
     if (!["ARCHIVE_REPLACE","ARCHIVE_KEEP","DELETE","KEEP"].includes(action)) action = "KEEP";
     if (!sourceIds.length) action = "KEEP";
 
-    let archiveText = String(p?.archiveText || p?.newText || p?.text || "").trim();
+    let archiveText = String(p?.archiveText || p?.newText || p?.what || p?.summaryText || p?.content || p?.text || "").trim();
     const keywords = unique(p?.keywords || extractKeywordsFromText(archiveText, settings.keywordLimit)).slice(0, settings.keywordLimit);
     let needsManual = false;
     let reason = String(p?.reason || "").trim().slice(0, 40);
@@ -1505,7 +1515,10 @@ ${JSON.stringify(records, null, 2)}`;
             }
 
             if (p.action === "MERGE_REPLACE") {
-              if (!firstRow || !text) return "skip";
+              if (!firstRow || !text) {
+                log("跳过空合并结果，未修改来源记忆。");
+                return "skip";
+              }
               const rangeWhen = sanitizeWhen(p.when || mergeWhenFromRows(sourceRows));
               await updateMemory(firstRow.id, text, firstRow.item, {
                 who: p.who || firstRow.who,
@@ -1673,6 +1686,49 @@ ${JSON.stringify(records, null, 2)}`;
           if (p._savedOriginal) state.proposals.set(id, p._savedOriginal);
           else state.proposals.delete(id);
           render();
+        }
+
+        async function rerunMergeAi(id) {
+          const p = state.proposals.get(id);
+          if (!p || p.type !== "merge") return;
+
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
+          const rows = (p.sourceIds || []).map(sourceId => currentRows().find(r => r.id === sourceId)).filter(Boolean);
+          if (rows.length < 2) {
+            roche.ui.toast("合并来源不足，无法重改。");
+            return;
+          }
+
+          setBusy(true);
+          try {
+            const records = rows.map(r => ({
+              id: r.id,
+              text: r.text,
+              when: r.when,
+              where: r.where,
+              localFlags: r.analysis.flags,
+              localRecommendation: r.analysis.recommendation
+            }));
+            const raw = await askAiForReview(roche, records, state.settings, state.customInstruction, "review");
+            const picked = raw.find(x => String(x?.action || "").trim().toUpperCase() === "MERGE_REPLACE") || raw[0] || null;
+            const factMap = new Map(currentRows().map(r => [r.id, r]));
+            const next = normalizeProposal(
+              picked || { action: "MERGE_REPLACE", sourceIds: p.sourceIds, newText: "", reason: "重改为空" },
+              factMap,
+              state.settings,
+              "review"
+            );
+
+            state.proposals.delete(id);
+            state.proposals.set(next.id, next);
+            state.showResults = true;
+            roche.ui.toast("合并结果已重新生成。");
+            render();
+          } catch (err) {
+            roche.ui.toast("合并重改失败：" + (err?.message || err));
+          } finally {
+            setBusy(false);
+          }
         }
 
         async function rerunOneAi(id) {
@@ -2031,7 +2087,7 @@ ${JSON.stringify(records, null, 2)}`;
           const canTighten = p.action === "COMPRESS" || p.action === "MERGE_REPLACE" || p.action === "ARCHIVE_REPLACE" || p.action === "ARCHIVE_KEEP";
           return `
             <div class="mtc-row" style="margin-top:8px">
-              ${!isGrouped ? `<button type="button" data-action="rerun" data-id="${id}">让AI重改</button>` : ""}
+              ${p.type === "merge" ? `<button type="button" data-action="rerun-merge" data-id="${id}">让AI重改</button>` : (!isGrouped ? `<button type="button" data-action="rerun" data-id="${id}">让AI重改</button>` : "")}
               ${canTighten ? `<button type="button" data-action="tighten" data-id="${id}">AI压短</button>` : ""}
               ${canCompress ? `<button type="button" data-action="single-compress" data-id="${id}">改为单条压缩</button>` : ""}
               <button type="button" data-action="mark-keep" data-id="${id}">保留原文</button>
@@ -2087,7 +2143,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.4</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4.1</div>
             </div>
 
             <div class="mtc-card">
@@ -2274,6 +2330,7 @@ ${JSON.stringify(records, null, 2)}`;
             if (action === "save-settings") return saveSettingsFromUi();
             if (action === "restore-defaults") return restoreDefaultSettings();
             if (action === "rerun") return rerunOneAi(id);
+            if (action === "rerun-merge") return rerunMergeAi(id);
             if (action === "single-compress") return convertToSingleCompress(id);
             if (action === "tighten") return tightenProposal(id);
             if (action === "tighten-split-item") return tightenProposal(id, btn.dataset.index);
