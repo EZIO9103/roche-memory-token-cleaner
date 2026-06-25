@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.2.0";
+  const VERSION = "2.3.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -320,33 +320,54 @@
   function buildReviewerPrompt(records, settings, customInstruction = "", mode = "review") {
     const compressOnly = mode === "compressOnly";
     const extra = cleanCustomInstruction(customInstruction);
-    return `你是 Roche 事实记忆清理器。你不是在总结聊天，而是在整理长期记忆。
+    return `你是 Roche 事实记忆清理器。你不是在写剧情总结，也不是在重写人设。你的任务是把长流水账整理成少量可召回的事件记忆。
 
 本次模式：
 ${compressOnly ? "仅压缩过长/流水账。只能返回 KEEP 或 COMPRESS，不能返回 DELETE 或 SPLIT。" : "完整审查。可以返回 KEEP、COMPRESS、SPLIT、DELETE。"}
 
-核心原则：
-1. 降 token 的目标不是把记忆压到最短，而是删掉流水账和重复噪音，保留能让角色继续接戏的具体事件锚点。
-2. Fact Memory 必须保持事件形态：谁因为什么，在什么情况下做了什么，造成什么关系后果。
-3. 禁止把事件熬成人设标签。不要写“逐渐习惯”“形成模式”“通常会”“倾向于”“已经开始用……维持……”这类归纳句。
-4. 旧事件可以变短，但不能变成抽象标签。必须保留事件骨架。
-5. 长流水账如果包含多个重要事件，优先 SPLIT 成 2-3 条，而不是压成一句。
-6. 关键词必须是具体搜索钩子，不要写抽象概念标签。好关键词：#拉黑 #认错 #love #石头 #面具 #香港。坏关键词：#关系 #未来 #情绪。
-7. 普通重复调情、表情包、无新后果的照片、临时害羞、普通玩笑，可以 DELETE。
-8. 如果某个普通元素承载了关系后果，例如道歉后的自拍、第一次边界让步、第一次明确拒绝降级，它不是噪音，应该保留为事件。
-9. Core Memory 不在本次处理范围。不要建议改人设。
+最高原则：
+把长流水账整理成少量可召回的事件记忆；优先保留关系后果、边界、承诺、地点、关键物品与关键称呼；删除重复噪音；不要把记忆写成人设归纳或小说摘要。
 
-长度：
-- 轻量事实：50-80 中文字。
-- 普通关系节点：80-140 中文字。
-- 重大转折/冲突和解：140-220 中文字。
-不要为了短而丢掉关键称呼、关键物品、关键动作、重要原话、地点变化、未完成承诺。
+Fact Memory 规则：
+1. Fact 必须像事件：谁因为什么，在什么情况下做了什么，造成什么关系后果。
+2. 禁止写成二次人设或行为归纳。不要写“逐渐习惯”“形成模式”“通常会”“倾向于”“已经开始用……维持……”。
+3. 不要把事件压成抽象标签，例如“关系更亲密”“更加重视感受”。必须保留事件骨架。
+4. 不要添加原文没有的信息。禁止补天气、氛围、心理动机、小说化收束句。
+5. 不要为了好看而润色。只保留事件、动作、关系后果。
+
+压缩规则：
+1. 优先删除分钟级流水账，只保留日期锚、阶段锚、行程锚。
+2. 保留“6月12日下午”“2026-06-23至24日”“香港最后一天”“离港前”“第一次”等有召回意义的时间。
+3. 删除或弱化“04:24、05:06、05:59”这类分钟时间，除非它本身是承诺、行程或离开节点。
+4. 压缩时不要强行短到一句。重大关系节点允许 140-220 中文字。
+5. 如果原文只是多个小互动堆在一起，但属于同一个主题，不要拆得太碎。
+
+SPLIT 拆分规则：
+1. 不要按时间点拆分。不要因为原文有多个时间戳就拆成多条。
+2. 只有当一条记忆里存在 2-3 个彼此独立、未来可单独召回、各自有长期后果的事件时，才 SPLIT。
+3. 拆分依据是主题和长期后果，不是时间顺序。
+4. 每条拆分结果必须能单独回答：发生了什么、为什么重要、以后为什么会被召回。
+5. 如果信息只是同一事件的连续细节，应该 COMPRESS 成一条，不要 SPLIT。
+
+关键词规则：
+1. 每条新记忆的关键词只允许来自该条内容。
+2. 禁止把同一组关键词复制给所有拆分条目。
+3. 禁止使用与本条无关的关键词。
+4. 关键词必须是具体搜索钩子，例如 #拉黑 #认错 #love #石头 #面具 #香港 #波本 #dirtytalk。
+5. 避免抽象概念标签，例如 #关系 #未来 #情绪 #亲密，除非该词就是原事件核心词。
+6. 关键词数量 2-4 个即可，宁少勿乱。
+
+删除规则：
+1. 普通重复调情、表情包、无新后果的照片、临时害羞、普通玩笑、重复解释，可以 DELETE。
+2. 如果某个信息只是重复已知关系，不形成新事件，不要单独成条。
+3. 如果普通元素承载了关系后果，例如道歉后的自拍、第一次边界让步、第一次明确拒绝降级，就不能当作噪音。
+4. 不确定是否删除时，优先 COMPRESS，不要瞎删。
 
 动作定义：
 KEEP：保留，不改。
 COMPRESS：单条事件仍有价值，但太长或流水账，压成一条事件记忆。
-SPLIT：一条旧记忆包含多个重要事件，拆成 2-3 条事件记忆。SPLIT 属于高风险，需要人工确认。
-DELETE：无长期后果、重复、过时、低价值，应遗忘。涉及承诺/地点/关系变化/边界/冲突和解的删除必须标为 confirm。
+SPLIT：一条旧记忆包含 2-3 个独立重要事件，拆成 2-3 条事件记忆。
+DELETE：无长期后果、重复、过时、低价值，应遗忘。
 
 ${extra ? `本次用户补充要求：\n${extra}\n` : ""}
 
@@ -972,6 +993,31 @@ ${JSON.stringify(records, null, 2)}`;
           return p;
         }
 
+        async function deleteOneFact(id) {
+          const row = currentRows().find(r => r.id === id);
+          if (!row) return;
+          const ok = await roche.ui.confirm({
+            title: "删除这条事实记忆",
+            message: "将直接删除这条 Roche 主事实记忆。确定继续吗？"
+          });
+          if (!ok) return;
+
+          setBusy(true);
+          try {
+            await roche.memory.delete(id);
+            state.facts = state.facts.filter(item => getMemoryId(item) !== id);
+            state.proposals.delete(id);
+            state.selected.delete(id);
+            state.verified.delete(id);
+            roche.ui.toast("已删除这条记忆。");
+            render();
+          } catch (err) {
+            roche.ui.toast("删除失败：" + (err?.message || err));
+          } finally {
+            setBusy(false);
+          }
+        }
+
         async function rerunOneAi(id) {
           const row = currentRows().find(r => r.id === id);
           if (!row) return;
@@ -1195,6 +1241,7 @@ ${JSON.stringify(records, null, 2)}`;
                       ${!isKeep ? `<button class="primary mtc-apply-confirm" data-id="${escapeHtml(p.id)}">应用这条</button>` : ""}
                       ${!isKeep ? `<button class="mtc-rerun-ai" data-id="${escapeHtml(p.id)}">让AI重改</button>` : ""}
                       <button class="mtc-keep-proposal" data-id="${escapeHtml(p.id)}">${isKeep ? "确认保留" : "保留原文"}</button>
+                      <button class="danger mtc-delete-one" data-id="${escapeHtml(p.id)}">删除这条</button>
                     </div>
                   </div>
                 `;
@@ -1230,7 +1277,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button id="mtc-back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2.2</div>
+              <div class="mtc-title">记忆低Token清理器 v2.3.3</div>
             </div>
 
             <div class="mtc-card">
@@ -1264,7 +1311,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <button id="mtc-ai-review" class="primary" ${disabled}>AI审查疑似记忆</button>
                 <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
                 <button id="mtc-apply-safe" class="primary" ${disabled}>清理${s.safe ? `(${s.safe})` : ""}</button>
-                <button id="mtc-toggle-confirm" ${disabled}>审查结果${s.totalProposals ? `(${s.totalProposals})` : ""}</button>
+                <button id="mtc-toggle-confirm" ${disabled}>查看/编辑结果${s.totalProposals ? `(${s.totalProposals})` : ""}</button>
                 <button id="mtc-toggle-custom-instruction" class="success" ${disabled}>审查补充要求</button>
                 <button id="mtc-delete-selected" class="danger" ${disabled}>删除勾选</button>
                 <button id="mtc-scroll-top" ${disabled}>回到顶部</button>
@@ -1397,6 +1444,7 @@ ${JSON.stringify(records, null, 2)}`;
           }));
           root.querySelectorAll(".mtc-apply-confirm").forEach(btn => btn.addEventListener("click", () => applyConfirmProposal(btn.dataset.id)));
           root.querySelectorAll(".mtc-rerun-ai").forEach(btn => btn.addEventListener("click", () => rerunOneAi(btn.dataset.id)));
+          root.querySelectorAll(".mtc-delete-one").forEach(btn => btn.addEventListener("click", () => deleteOneFact(btn.dataset.id)));
           root.querySelectorAll(".mtc-keep-proposal").forEach(btn => btn.addEventListener("click", () => keepProposal(btn.dataset.id)));
         }
 
