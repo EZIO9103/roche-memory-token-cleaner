@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "1.0.6";
+  const VERSION = "1.0.7";
 
   const DEFAULT_SETTINGS = {
     maxChars: 70,
@@ -199,16 +199,18 @@
     return { len, timeHits, lowHits, importantHits, flags, recommendation, tokenEstimate: estimateTokens(t) };
   }
 
-  function buildReviewerPrompt(records, settings, customInstruction = "") {
+  function buildReviewerPrompt(records, settings, customInstruction = "", mode = "review") {
     const today = nowDateText();
     return `你是 Roche 记忆低 Token 清理器。今天是 ${today}。
 
 你正在审查一组事实记忆。你的任务不是总结聊天，而是判断这些记忆是否值得继续留在长期记忆里。
 
+${mode === "compressOnly" ? "本次模式：仅压缩过长/流水账。只能返回 KEEP 或 COMPRESS，不能返回 DELETE。除非完全无文本可处理，否则不要删除。" : "本次模式：完整审查。可以返回 KEEP、COMPRESS 或 DELETE。"}
+
 对每条记忆只允许选择一个动作：
 KEEP：仍然重要，保留不动。
 COMPRESS：有价值但太长、太流水账，需要压缩。
-DELETE：普通、重复、过时、无后续意义，应遗忘。
+${mode === "compressOnly" ? "" : "DELETE：普通、重复、过时、无后续意义，应遗忘。"}
 
 判断标准：
 ${cleanCustomInstruction(customInstruction) ? `
@@ -250,8 +252,8 @@ ${cleanCustomInstruction(customInstruction)}
 ${JSON.stringify(records, null, 2)}`;
   }
 
-  async function askAiForReview(roche, records, settings, customInstruction = "") {
-    const prompt = buildReviewerPrompt(records, settings, customInstruction);
+  async function askAiForReview(roche, records, settings, customInstruction = "", mode = "review") {
+    const prompt = buildReviewerPrompt(records, settings, customInstruction, mode);
     const result = await roche.ai.chat({
       messages: [
         { role: "system", content: "你是 JSON API。只输出有效 JSON 数组，不输出解释、Markdown 或代码块。输出必须以 [ 开头，以 ] 结尾。" },
@@ -271,7 +273,7 @@ ${JSON.stringify(records, null, 2)}`;
       // 有些模型在批量时会返回说明文字或截断 JSON。失败时自动降级为逐条审查，避免整批报错。
       const recovered = [];
       for (const record of records) {
-        const singlePrompt = buildReviewerPrompt([record], settings, customInstruction);
+        const singlePrompt = buildReviewerPrompt([record], settings, customInstruction, mode);
         const single = await roche.ai.chat({
           messages: [
             { role: "system", content: "你是 JSON API。只输出一个 JSON 数组，数组内只有一个对象。不要解释、Markdown 或代码块。" },
@@ -495,6 +497,34 @@ ${JSON.stringify(records, null, 2)}`;
         color: var(--mtc-muted-color, rgba(31,35,40,.62));
         margin-top: 6px;
       }
+      .roche-plugin-memory-token-cleaner .mtc-switch-button {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        text-align: left;
+        padding: 12px 10px;
+        border-radius: 0 !important;
+        border-width: 0 0 1px 0 !important;
+        background: transparent !important;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-switch-button:last-child {
+        border-bottom-width: 0 !important;
+      }
+      .roche-plugin-memory-token-cleaner .mtc-switch-pill {
+        min-width: 44px;
+        text-align: center;
+        border-radius: 999px;
+        padding: 4px 10px;
+        font-size: 12px;
+        background: var(--mtc-soft-bg, #f1f3f5);
+        border: 1px solid var(--mtc-border-color, rgba(31,35,40,.13));
+      }
+      .roche-plugin-memory-token-cleaner .mtc-switch-button.on .mtc-switch-pill {
+        background: var(--mtc-primary-bg, #dfe8ff);
+        border-color: var(--mtc-primary-border, #b7c7ff);
+      }
       .roche-plugin-memory-token-cleaner .mtc-hidden { display: none !important; }
       .roche-plugin-memory-token-cleaner .mtc-log {
         max-height: 160px; overflow: auto; font-size: 12px; line-height: 1.4;
@@ -608,6 +638,7 @@ ${JSON.stringify(records, null, 2)}`;
             proposals: new Map(),
             selected: new Set(),
             customInstruction: "",
+            reviewMode: "review",
             busy: false
           };
 
@@ -812,7 +843,7 @@ ${JSON.stringify(records, null, 2)}`;
                   localRecommendation: r.analysis.recommendation
                 }));
                 log(`AI审查第 ${Math.floor(i / state.settings.batchSize) + 1} 批，共 ${records.length} 条。`);
-                const raw = await askAiForReview(roche, records, state.settings, state.customInstruction);
+                const raw = await askAiForReview(roche, records, state.settings, state.customInstruction, state.reviewMode || "review");
                 const factMap = new Map(currentFactsWithAnalysis().map(r => [r.id, r]));
                 raw.map(p => normalizeProposal(p, factMap, state.settings)).forEach(p => {
                   state.proposals.set(p.id, p);
@@ -880,13 +911,20 @@ ${JSON.stringify(records, null, 2)}`;
           }
 
           async function quickCompressFlagged() {
-            const rows = currentFactsWithAnalysis().filter(r => r.analysis.recommendation === "COMPRESS");
+            const rows = currentFactsWithAnalysis().filter(r =>
+              r.analysis.flags.includes("过长") ||
+              r.analysis.flags.includes("像流水账") ||
+              r.analysis.flags.includes("多事件")
+            );
             if (!rows.length) {
               roche.ui.toast("没有本地识别到需要压缩的记忆。");
               return;
             }
+            const oldMode = state.reviewMode;
+            state.reviewMode = "compressOnly";
             state.selected = new Set(rows.map(r => r.id));
             await reviewWithAi();
+            state.reviewMode = oldMode || "review";
           }
 
           async function deleteSelected() {
@@ -961,15 +999,24 @@ ${JSON.stringify(records, null, 2)}`;
             next.keywordLimit = Math.max(0, Math.min(6, num("#mtc-keyword-limit", next.keywordLimit)));
             next.batchSize = Math.max(1, Math.min(20, num("#mtc-batch-size", next.batchSize)));
             next.longTermLimit = Math.max(50, Math.min(1000, num("#mtc-long-limit", next.longTermLimit)));
-            next.writeKeywords = !!root.querySelector("#mtc-write-keywords")?.checked;
-            next.strictMode = !!root.querySelector("#mtc-strict")?.checked;
-            next.autoApplyCompress = !!root.querySelector("#mtc-auto-compress")?.checked;
-            next.showCore = !!root.querySelector("#mtc-show-core")?.checked;
-            next.showVectors = !!root.querySelector("#mtc-show-vectors")?.checked;
+            next.writeKeywords = !!state.settings.writeKeywords;
+            next.strictMode = !!state.settings.strictMode;
+            next.autoApplyCompress = !!state.settings.autoApplyCompress;
+            next.showCore = !!state.settings.showCore;
+            next.showVectors = !!state.settings.showVectors;
             state.settings = next;
             await saveSettings(roche, next);
             roche.ui.toast("设置已保存。");
             render();
+          }
+
+          function renderSwitchRow(key, label, value) {
+            return `
+              <button type="button" class="mtc-switch-button ${value ? "on" : ""}" data-setting-key="${escapeHtml(key)}" aria-pressed="${value ? "true" : "false"}">
+                <span>${escapeHtml(label)}</span>
+                <span class="mtc-switch-pill">${value ? "开" : "关"}</span>
+              </button>
+            `;
           }
 
           function render() {
@@ -1015,12 +1062,6 @@ ${JSON.stringify(records, null, 2)}`;
               </div>
 
               <div class="mtc-card">
-                <div style="font-weight:700; margin-bottom:8px">本次 AI 审查补充要求</div>
-                <textarea id="mtc-custom-instruction" placeholder="可选，不填也可以。这里可以临时提醒 AI：例如“不要删除香港/伦敦地点”“保留承诺和边界”“这段时间线很重要，只压缩不要删除”“注意区分 Price 和 Ghost”“不要把调情全删掉，保留第一次形成边界的事件”。这些灰字只是示例，不会自动植入。">${escapeHtml(state.customInstruction || "")}</textarea>
-                <div class="mtc-field-note">这段只会在你点击“AI审查疑似记忆/压缩过长”时发送给 AI，用来影响本次判断；不会写进 Roche 记忆。</div>
-              </div>
-
-              <div class="mtc-card">
                 <div class="mtc-row">
                   <button id="mtc-ai-review" class="primary" ${disabled}>AI审查疑似记忆</button>
                   <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
@@ -1047,12 +1088,19 @@ ${JSON.stringify(records, null, 2)}`;
 
                 <details style="margin-top:12px">
                   <summary>高级开关</summary>
+
+                  <details style="margin-top:10px">
+                    <summary>本次审查补充要求</summary>
+                    <textarea id="mtc-custom-instruction" placeholder="例：保留地点；注意时间顺序；只压缩不删除；保留未完成承诺。">${escapeHtml(state.customInstruction || "")}</textarea>
+                    <div class="mtc-field-note">仅影响本次 AI 审查。</div>
+                  </details>
+
                   <div style="margin-top:8px">
-                    <label class="mtc-switch-row"><span>关键词写回主记忆</span><input id="mtc-write-keywords" type="checkbox" ${state.settings.writeKeywords ? "checked" : ""}></label>
-                    <label class="mtc-switch-row"><span>严格低Token模式</span><input id="mtc-strict" type="checkbox" ${state.settings.strictMode ? "checked" : ""}></label>
-                    <label class="mtc-switch-row"><span>压缩建议可自动应用</span><input id="mtc-auto-compress" type="checkbox" ${state.settings.autoApplyCompress ? "checked" : ""}></label>
-                    <label class="mtc-switch-row"><span>显示Core Memory</span><input id="mtc-show-core" type="checkbox" ${state.settings.showCore ? "checked" : ""}></label>
-                    <label class="mtc-switch-row"><span>显示向量区</span><input id="mtc-show-vectors" type="checkbox" ${state.settings.showVectors ? "checked" : ""}></label>
+                    ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
+                    ${renderSwitchRow("strictMode", "严格低Token模式", state.settings.strictMode)}
+                    ${renderSwitchRow("autoApplyCompress", "压缩建议可自动应用", state.settings.autoApplyCompress)}
+                    ${renderSwitchRow("showCore", "显示Core Memory", state.settings.showCore)}
+                    ${renderSwitchRow("showVectors", "显示向量区", state.settings.showVectors)}
                   </div>
                 </details>
 
@@ -1158,7 +1206,15 @@ ${JSON.stringify(records, null, 2)}`;
             root.querySelector("#mtc-custom-instruction")?.addEventListener("input", e => {
               state.customInstruction = e.target.value;
             });
-            root.querySelector("#mtc-ai-review")?.addEventListener("click", reviewWithAi);
+            root.querySelectorAll(".mtc-switch-button").forEach(btn => {
+              btn.addEventListener("click", () => {
+                const key = btn.dataset.settingKey;
+                if (!key || !(key in state.settings)) return;
+                state.settings[key] = !state.settings[key];
+                render();
+              });
+            });
+            root.querySelector("#mtc-ai-review")?.addEventListener("click", () => { state.reviewMode = "review"; reviewWithAi(); });
             root.querySelector("#mtc-quick-compress")?.addEventListener("click", quickCompressFlagged);
             root.querySelector("#mtc-apply")?.addEventListener("click", applyProposals);
             root.querySelector("#mtc-delete-selected")?.addEventListener("click", deleteSelected);
