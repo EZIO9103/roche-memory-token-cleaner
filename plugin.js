@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.4";
 
   const DEFAULT_SETTINGS = {
     maxChars: 70,
@@ -14,7 +14,7 @@
     strictMode: true,
     autoApplyCompress: false,
     deleteNeedsConfirm: true,
-    batchSize: 8,
+    batchSize: 3,
     longTermLimit: 300,
     showCore: false,
     showVectors: true
@@ -79,18 +79,78 @@
     return t;
   }
 
+  function extractAiText(result) {
+    if (typeof result === "string") return result;
+    if (!result) return "";
+    const candidates = [
+      result.text,
+      result.content,
+      result.output_text,
+      result.outputText,
+      result.message?.content,
+      result.data?.text,
+      result.data?.content,
+      result.choices?.[0]?.message?.content,
+      result.choices?.[0]?.text,
+      result.response?.text,
+      result.response?.content
+    ];
+    for (const c of candidates) {
+      if (typeof c === "string" && c.trim()) return c;
+    }
+    try { return JSON.stringify(result); } catch (_) { return ""; }
+  }
+
+  function repairJsonLikeText(text) {
+    return String(text || "")
+      .replace(/^\uFEFF/, "")
+      .replace(/[“”]/g, '"')
+      .replace(/[‘’]/g, "'")
+      .trim();
+  }
+
   function safeJsonParse(text) {
-    const raw = stripCodeFence(text);
+    const raw = repairJsonLikeText(stripCodeFence(text));
+
     try { return JSON.parse(raw); } catch (_) {}
-    const firstArray = raw.match(/\[[\s\S]*\]/);
-    if (firstArray) {
-      try { return JSON.parse(firstArray[0]); } catch (_) {}
+
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced) {
+      try { return JSON.parse(repairJsonLikeText(fenced[1])); } catch (_) {}
     }
-    const firstObject = raw.match(/\{[\s\S]*\}/);
-    if (firstObject) {
-      try { return JSON.parse(firstObject[0]); } catch (_) {}
+
+    const arrayStart = raw.indexOf("[");
+    const arrayEnd = raw.lastIndexOf("]");
+    if (arrayStart !== -1 && arrayEnd > arrayStart) {
+      const arrText = raw.slice(arrayStart, arrayEnd + 1);
+      try { return JSON.parse(arrText); } catch (_) {}
     }
-    throw new Error("AI 返回内容不是可解析 JSON。");
+
+    const objectStart = raw.indexOf("{");
+    const objectEnd = raw.lastIndexOf("}");
+    if (objectStart !== -1 && objectEnd > objectStart) {
+      const objText = raw.slice(objectStart, objectEnd + 1);
+      try {
+        const obj = JSON.parse(objText);
+        if (Array.isArray(obj)) return obj;
+        if (Array.isArray(obj.items)) return obj.items;
+        if (Array.isArray(obj.results)) return obj.results;
+        if (Array.isArray(obj.memories)) return obj.memories;
+        if (Array.isArray(obj.proposals)) return obj.proposals;
+        return [obj];
+      } catch (_) {}
+    }
+
+    const lines = raw.split(/\n+/).map(x => x.trim()).filter(Boolean);
+    const parsedLines = [];
+    for (const line of lines) {
+      if (!line.startsWith("{") || !line.endsWith("}")) continue;
+      try { parsedLines.push(JSON.parse(line)); } catch (_) {}
+    }
+    if (parsedLines.length) return parsedLines;
+
+    const preview = raw.slice(0, 300).replace(/\s+/g, " ");
+    throw new Error("AI 返回内容不是可解析 JSON。返回开头：" + preview);
   }
 
   function estimateTokens(text) {
@@ -162,7 +222,7 @@ DELETE：普通、重复、过时、无后续意义，应遗忘。
 默认 ${settings.preferredMin}-${settings.preferredMax} 个中文字，最多 ${settings.maxChars} 个中文字。
 关键词只给 2-${settings.keywordLimit} 个，用于检索。
 
-返回严格 JSON 数组，不要解释，不要代码块。
+只返回严格 JSON 数组。不要解释，不要寒暄，不要 Markdown，不要代码块。输出必须以 [ 开头，以 ] 结尾。
 每项格式：
 {
   "id": "原id",
@@ -180,15 +240,38 @@ ${JSON.stringify(records, null, 2)}`;
     const prompt = buildReviewerPrompt(records, settings);
     const result = await roche.ai.chat({
       messages: [
-        { role: "system", content: "你只输出有效 JSON，不输出解释。" },
+        { role: "system", content: "你是 JSON API。只输出有效 JSON 数组，不输出解释、Markdown 或代码块。输出必须以 [ 开头，以 ] 结尾。" },
         { role: "user", content: prompt }
       ],
-      temperature: 0.2
+      temperature: 0
     });
-    const text = result?.text || result?.content || "";
-    const parsed = safeJsonParse(text);
-    if (!Array.isArray(parsed)) throw new Error("AI 返回 JSON 不是数组。");
-    return parsed;
+
+    const text = extractAiText(result);
+    try {
+      const parsed = safeJsonParse(text);
+      if (!Array.isArray(parsed)) throw new Error("AI 返回 JSON 不是数组。");
+      return parsed;
+    } catch (err) {
+      if (records.length <= 1) throw err;
+
+      // 有些模型在批量时会返回说明文字或截断 JSON。失败时自动降级为逐条审查，避免整批报错。
+      const recovered = [];
+      for (const record of records) {
+        const singlePrompt = buildReviewerPrompt([record], settings);
+        const single = await roche.ai.chat({
+          messages: [
+            { role: "system", content: "你是 JSON API。只输出一个 JSON 数组，数组内只有一个对象。不要解释、Markdown 或代码块。" },
+            { role: "user", content: singlePrompt }
+          ],
+          temperature: 0
+        });
+        const singleText = extractAiText(single);
+        const parsedSingle = safeJsonParse(singleText);
+        if (Array.isArray(parsedSingle)) recovered.push(...parsedSingle);
+        else recovered.push(parsedSingle);
+      }
+      return recovered;
+    }
   }
 
   function normalizeProposal(p, factMap, settings) {
@@ -233,13 +316,30 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner {
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         color: var(--text-primary, #f5f5f5);
+        position: absolute;
+        inset: 0;
+        display: block;
         padding: 14px;
-        min-height: 100%;
+        padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+        height: auto;
+        min-height: 0;
+        max-height: none;
+        overflow-y: scroll !important;
+        overflow-x: hidden !important;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-y: contain;
+        touch-action: pan-y;
         box-sizing: border-box;
       }
       .roche-plugin-memory-token-cleaner * { box-sizing: border-box; }
       .roche-plugin-memory-token-cleaner .mtc-top {
         display: flex; gap: 8px; align-items: center; margin-bottom: 12px;
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        padding: 4px 0 8px;
+        background: var(--bg-primary, rgba(20,20,24,.92));
+        backdrop-filter: blur(10px);
       }
       .roche-plugin-memory-token-cleaner button,
       .roche-plugin-memory-token-cleaner select,
@@ -342,6 +442,10 @@ ${JSON.stringify(records, null, 2)}`;
         max-height: 160px; overflow: auto; font-size: 12px; line-height: 1.4;
         background: rgba(0,0,0,.18); border-radius: 12px; padding: 8px;
       }
+      .roche-plugin-memory-token-cleaner .mtc-bottom-spacer {
+        height: calc(80px + env(safe-area-inset-bottom, 0px));
+        flex: 0 0 auto;
+      }
     `;
     return style;
   }
@@ -372,15 +476,78 @@ ${JSON.stringify(records, null, 2)}`;
             busy: false
           };
 
+          const previousContainerOverflow = container.style.overflow;
+          const previousContainerHeight = container.style.height;
+          const previousContainerMinHeight = container.style.minHeight;
+          const previousContainerPosition = container.style.position;
+          const previousContainerTouchAction = container.style.touchAction;
+          const previousContainerWebkitOverflowScrolling = container.style.webkitOverflowScrolling;
+          container.style.position = "relative";
+          container.style.overflow = "hidden";
+          container.style.height = "100dvh";
+          container.style.minHeight = "0";
+          container.style.touchAction = "pan-y";
+          container.style.webkitOverflowScrolling = "touch";
+
           const root = document.createElement("div");
           root.className = "roche-plugin-memory-token-cleaner";
           container.replaceChildren(root);
+          installTouchScrollFallback(root);
 
           function log(msg) {
             const el = root.querySelector("#mtc-log");
             if (!el) return;
             const time = new Date().toLocaleTimeString();
             el.insertAdjacentHTML("afterbegin", `<div>[${escapeHtml(time)}] ${escapeHtml(msg)}</div>`);
+          }
+
+          function installTouchScrollFallback(scrollEl) {
+            let lastY = 0;
+            let active = false;
+            let moved = false;
+
+            const isInteractive = target => {
+              return !!target?.closest?.("input, textarea, select, button, summary, .mtc-log");
+            };
+
+            scrollEl.addEventListener("touchstart", e => {
+              if (!e.touches || !e.touches.length) return;
+              active = true;
+              moved = false;
+              lastY = e.touches[0].clientY;
+            }, { passive: true });
+
+            scrollEl.addEventListener("touchmove", e => {
+              if (!active || !e.touches || !e.touches.length) return;
+              if (isInteractive(e.target) && Math.abs(e.touches[0].clientY - lastY) < 6) return;
+
+              const y = e.touches[0].clientY;
+              const dy = lastY - y;
+              lastY = y;
+
+              if (Math.abs(dy) < 1) return;
+              const canScroll = scrollEl.scrollHeight > scrollEl.clientHeight + 2;
+              if (!canScroll) return;
+
+              const before = scrollEl.scrollTop;
+              scrollEl.scrollTop = before + dy;
+              moved = true;
+
+              // 在部分 Android WebView 中，默认 touch 滚动被宿主拦截；这里手动滚动后阻止默认事件。
+              if (scrollEl.scrollTop !== before || moved) {
+                e.preventDefault();
+              }
+            }, { passive: false });
+
+            scrollEl.addEventListener("touchend", () => {
+              active = false;
+              moved = false;
+            }, { passive: true });
+
+            scrollEl.addEventListener("touchcancel", () => {
+              active = false;
+              moved = false;
+            }, { passive: true });
           }
 
           function setBusy(busy) {
@@ -407,21 +574,55 @@ ${JSON.stringify(records, null, 2)}`;
           }
 
           async function loadConversations() {
-            if (!roche.conversation?.list) {
-              roche.ui.toast("当前 Roche API 未提供 conversation.list。");
-              return;
-            }
             setBusy(true);
             try {
-              const list = await roche.conversation.list();
+              let list = [];
+
+              // 新版/部分构建可能提供 conversation.list。
+              if (roche.conversation?.list) {
+                const convs = await roche.conversation.list();
+                list = (Array.isArray(convs) ? convs : []).map(c => ({
+                  ...c,
+                  id: c.id || c.conversationId || "",
+                  name: c.name || c.title || c.handle || c.displayName || c.id || c.conversationId || "未命名会话",
+                  source: "conversation"
+                }));
+                log(`通过 conversation.list 读取 ${list.length} 个会话。`);
+              }
+
+              // 说明书稳定公开的是 character.list；角色字段里有 conversationId。
+              // 某些 Roche 构建没有 conversation.list，所以这里用角色列表降级。
+              if ((!list || !list.length) && roche.character?.list) {
+                const chars = await roche.character.list();
+                list = (Array.isArray(chars) ? chars : [])
+                  .map(ch => ({
+                    id: ch.conversationId || "",
+                    characterId: ch.id || "",
+                    name: ch.handle || ch.name || ch.displayName || ch.id || "未命名角色",
+                    title: ch.name || ch.handle || ch.displayName || "",
+                    avatar: ch.avatar || "",
+                    isGroup: false,
+                    type: "character",
+                    source: "character"
+                  }))
+                  .filter(c => c.id);
+                log(`当前 Roche 未提供 conversation.list，已改用 character.list 读取 ${list.length} 个角色会话。`);
+              }
+
+              // 最后的兜底：保留手动输入。
               state.conversations = Array.isArray(list) ? list : [];
               if (!state.conversationId && state.conversations.length) {
                 const first = state.conversations[0];
                 state.conversationId = first.id || first.conversationId || "";
               }
-              log(`已读取 ${state.conversations.length} 个会话。`);
+
+              if (!state.conversations.length) {
+                log("未能自动拉取会话。可在下方手动粘贴 conversationId 后读取记忆。");
+                roche.ui.toast("未能自动拉取会话：当前 Roche 可能缺少 conversation.list 和 character.list。");
+              }
             } catch (err) {
               roche.ui.toast("读取会话失败：" + (err?.message || err));
+              log("读取会话失败：" + (err?.message || err));
             } finally {
               setBusy(false);
             }
@@ -641,7 +842,7 @@ ${JSON.stringify(records, null, 2)}`;
             const convOptions = state.conversations.map(c => {
               const id = c.id || c.conversationId || "";
               const name = c.name || c.title || c.handle || c.displayName || id || "未命名会话";
-              const type = c.isGroup || c.type === "group" ? "群聊" : "私聊";
+              const type = c.isGroup || c.type === "group" ? "群聊" : (c.source === "character" ? "角色" : "私聊");
               return `<option value="${escapeHtml(id)}" ${id === state.conversationId ? "selected" : ""}>${escapeHtml(name)}｜${type}</option>`;
             }).join("");
 
@@ -659,8 +860,12 @@ ${JSON.stringify(records, null, 2)}`;
                   <button id="mtc-load-conv" ${disabled}>刷新会话</button>
                   <button id="mtc-load-memory" class="primary" ${disabled}>读取记忆</button>
                 </div>
+                <div class="mtc-row" style="margin-top:8px">
+                  <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1; min-width:220px">
+                  <button id="mtc-use-manual-conv" ${disabled}>使用这个ID</button>
+                </div>
                 <div class="mtc-muted" style="margin-top:8px">
-                  Core Memory 只读不改。插件只通过 Roche 公开 API 更新/删除事实记忆，不直接操作主数据库。
+                  Core Memory 只读不改。若某个 Roche 构建没有 conversation.list，插件会自动改用 character.list；仍失败时可手动填 conversationId。
                 </div>
               </div>
 
@@ -679,6 +884,8 @@ ${JSON.stringify(records, null, 2)}`;
                   <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
                   <button id="mtc-apply" class="primary" ${disabled}>应用建议 ${proposalCount ? `(${proposalCount})` : ""}</button>
                   <button id="mtc-delete-selected" class="danger" ${disabled}>删除勾选</button>
+                  <button id="mtc-scroll-top" ${disabled}>回到顶部</button>
+                  <button id="mtc-scroll-bottom" ${disabled}>到底部</button>
                 </div>
                 <div class="mtc-muted" style="margin-top:8px">
                   建议：Roche“最新事实注入上限”设为 3～5；本插件负责把主事实记忆压短、去重、关键词化。
@@ -733,6 +940,7 @@ ${JSON.stringify(records, null, 2)}`;
               <div class="mtc-card">
                 <div class="mtc-log" id="mtc-log"></div>
               </div>
+              <div class="mtc-bottom-spacer"></div>
             `;
 
             bindEvents();
@@ -774,6 +982,21 @@ ${JSON.stringify(records, null, 2)}`;
             root.querySelector("#mtc-back")?.addEventListener("click", () => roche.ui.closeApp());
             root.querySelector("#mtc-load-conv")?.addEventListener("click", loadConversations);
             root.querySelector("#mtc-load-memory")?.addEventListener("click", loadMemory);
+            root.querySelector("#mtc-use-manual-conv")?.addEventListener("click", () => {
+              const manual = String(root.querySelector("#mtc-manual-conversation-id")?.value || "").trim();
+              if (!manual) {
+                roche.ui.toast("请先粘贴 conversationId。");
+                return;
+              }
+              state.conversationId = manual;
+              state.facts = [];
+              state.vectors = [];
+              state.core = null;
+              state.proposals.clear();
+              state.selected.clear();
+              log("已切换到手动 conversationId。");
+              render();
+            });
             root.querySelector("#mtc-conversation")?.addEventListener("change", e => {
               state.conversationId = e.target.value;
               state.facts = [];
@@ -787,6 +1010,8 @@ ${JSON.stringify(records, null, 2)}`;
             root.querySelector("#mtc-quick-compress")?.addEventListener("click", quickCompressFlagged);
             root.querySelector("#mtc-apply")?.addEventListener("click", applyProposals);
             root.querySelector("#mtc-delete-selected")?.addEventListener("click", deleteSelected);
+            root.querySelector("#mtc-scroll-top")?.addEventListener("click", () => root.scrollTo({ top: 0, behavior: "smooth" }));
+            root.querySelector("#mtc-scroll-bottom")?.addEventListener("click", () => root.scrollTo({ top: root.scrollHeight, behavior: "smooth" }));
             root.querySelector("#mtc-save-settings")?.addEventListener("click", saveSettingsFromUi);
             root.querySelector("#mtc-delete-vectors")?.addEventListener("click", tryDeleteVectors);
             root.querySelector("#mtc-select-flagged")?.addEventListener("click", () => {
@@ -815,6 +1040,12 @@ ${JSON.stringify(records, null, 2)}`;
 
           container.__memoryTokenCleanerUnmount = () => {
             style.remove();
+            container.style.overflow = previousContainerOverflow;
+            container.style.height = previousContainerHeight;
+            container.style.minHeight = previousContainerMinHeight;
+            container.style.position = previousContainerPosition;
+            container.style.touchAction = previousContainerTouchAction;
+            container.style.webkitOverflowScrolling = previousContainerWebkitOverflowScrolling;
           };
         },
         async unmount(container, roche) {
