@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.3.0";
+  const VERSION = "2.4.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -903,30 +903,18 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function applySafeProposals() {
-          const all = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP");
-          if (!all.length) {
-            roche.ui.toast("没有 AI 建议可清理。");
-            return;
-          }
+          // 先同步人工审查区里用户手动编辑过的内容。
+          Array.from(state.proposals.keys()).forEach(id => syncEditedProposal(id));
 
-          const blocked = state.settings.executeAllAiSuggestions ? [] : all.filter(p => p.needsManual);
-          const proposals = state.settings.executeAllAiSuggestions ? all : all.filter(p => !p.needsManual);
-
+          const proposals = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP");
           if (!proposals.length) {
-            roche.ui.toast("只有需处理项。请查看/编辑结果，或在高级设置打开“全部执行AI建议”。");
-            state.showConfirmPanel = true;
-            render();
+            roche.ui.toast("没有可应用的 AI 结果。");
             return;
           }
-
-          let message = `将应用 ${proposals.length} 条 AI 建议`;
-          if (blocked.length) message += `，并暂不处理 ${blocked.length} 条需处理项`;
-          if (state.settings.executeAllAiSuggestions) message += "，包括拆分和删除";
-          message += "。确定继续吗？";
 
           const ok = await roche.ui.confirm({
-            title: state.settings.executeAllAiSuggestions ? "全部执行AI建议" : "清理",
-            message
+            title: "应用全部结果",
+            message: `将应用 ${proposals.length} 条 AI 结果，包括压缩、拆分或删除。确定继续吗？`
           });
           if (!ok) return;
 
@@ -941,102 +929,16 @@ ${JSON.stringify(records, null, 2)}`;
               else done.skip++;
             }
             for (const p of proposals) applyProposalToLocalState(p);
-
-            // 全部执行模式下，KEEP 项也自动确认，不再留给用户看。
-            if (state.settings.executeAllAiSuggestions) {
-              Array.from(state.proposals.values()).filter(p => p.action === "KEEP").forEach(p => {
-                state.verified.add(p.id);
-                state.proposals.delete(p.id);
-              });
-            }
-
+            Array.from(state.proposals.values()).filter(p => p.action === "KEEP").forEach(p => {
+              state.verified.add(p.id);
+              state.proposals.delete(p.id);
+            });
             roche.ui.toast(`完成：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}。`);
-            log(`已清理：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}，跳过 ${done.skip}。${blocked.length ? ` 保留需处理 ${blocked.length} 条。` : ""}`);
+            log(`已应用全部结果：压缩 ${done.compress}，删除 ${done.delete}，拆分 ${done.split}，跳过 ${done.skip}。`);
             render();
           } catch (err) {
-            roche.ui.toast("清理失败：" + (err?.message || err));
-            log("清理失败：" + (err?.message || err));
-          } finally {
-            setBusy(false);
-          }
-        }
-
-        function syncEditedProposal(id) {
-          const p = state.proposals.get(id);
-          if (!p) return p;
-          const text = root.querySelector(`.mtc-edit-text[data-id="${CSS.escape(id)}"]`)?.value;
-          if (typeof text !== "string") return p;
-
-          if (p.action === "COMPRESS") {
-            let cleaned = text.trim();
-            // 如果用户把关键词也留在正文里，直接按最终文本写入，不再重复追加关键词。
-            p.newText = cleaned;
-            p.keywords = [];
-          }
-
-          if (p.action === "SPLIT") {
-            const parts = text.split(/\n---\n/g).map(x => x.trim()).filter(Boolean);
-            if (parts.length >= 2) {
-              p.newItems = parts;
-              p.keywords = [];
-            } else {
-              p.action = "COMPRESS";
-              p.newText = text.trim();
-              p.newItems = [];
-              p.keywords = [];
-            }
-          }
-
-          p.needsManual = false;
-          p.risk = "safe";
-          state.proposals.set(id, p);
-          return p;
-        }
-
-        async function deleteOneFact(id) {
-          const row = currentRows().find(r => r.id === id);
-          if (!row) return;
-          const ok = await roche.ui.confirm({
-            title: "删除这条事实记忆",
-            message: "将直接删除这条 Roche 主事实记忆。确定继续吗？"
-          });
-          if (!ok) return;
-
-          setBusy(true);
-          try {
-            await roche.memory.delete(id);
-            state.facts = state.facts.filter(item => getMemoryId(item) !== id);
-            state.proposals.delete(id);
-            state.selected.delete(id);
-            state.verified.delete(id);
-            roche.ui.toast("已删除这条记忆。");
-            render();
-          } catch (err) {
-            roche.ui.toast("删除失败：" + (err?.message || err));
-          } finally {
-            setBusy(false);
-          }
-        }
-
-        async function rerunOneAi(id) {
-          const row = currentRows().find(r => r.id === id);
-          if (!row) return;
-          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
-          setBusy(true);
-          try {
-            const raw = await askAiForReview(roche, [{
-              id: row.id,
-              text: row.text,
-              localFlags: row.analysis.flags,
-              localRecommendation: row.analysis.recommendation
-            }], state.settings, state.customInstruction, state.reviewMode);
-            const factMap = new Map(currentRows().map(r => [r.id, r]));
-            const p = normalizeProposal(raw[0] || { id, action:"KEEP" }, factMap, state.settings, state.reviewMode);
-            state.proposals.set(id, p);
-            state.showConfirmPanel = true;
-            roche.ui.toast("已重新生成。");
-          } catch (err) {
-            roche.ui.toast("重改失败：" + (err?.message || err));
+            roche.ui.toast("应用失败：" + (err?.message || err));
+            log("应用失败：" + (err?.message || err));
           } finally {
             setBusy(false);
           }
@@ -1046,15 +948,16 @@ ${JSON.stringify(records, null, 2)}`;
           const p = syncEditedProposal(id);
           if (!p) return;
           const ok = await roche.ui.confirm({
-            title: "应用待确认建议",
-            message: `将执行 ${p.action}。此操作可能修改或删除主事实记忆，确定继续吗？`
+            title: "应用这条结果",
+            message: `将执行 ${p.action}。此操作会写回事实记忆，确定继续吗？`
           });
           if (!ok) return;
           setBusy(true);
           try {
             await applyOneProposal(p);
-            roche.ui.toast("已应用。");
-            await loadMemory();
+            applyProposalToLocalState(p);
+            roche.ui.toast("已应用这条。");
+            render();
           } catch (err) {
             roche.ui.toast("应用失败：" + (err?.message || err));
           } finally {
@@ -1183,18 +1086,16 @@ ${JSON.stringify(records, null, 2)}`;
 
         function renderFact(r) {
           const p = state.proposals.get(r.id);
-          const checked = state.selected.has(r.id) ? "checked" : "";
           const recClass = r.analysis.recommendation === "DELETE" ? "danger" : (r.analysis.recommendation === "COMPRESS" ? "warn" : "");
           const flags = r.analysis.flags.map(f => `<span class="mtc-badge warn">${escapeHtml(f)}</span>`).join("");
           return `
             <div class="mtc-fact" data-id="${escapeHtml(r.id)}">
               <div class="mtc-row" style="justify-content:space-between">
-                <label class="mtc-row" style="gap:6px">
-                  <input type="checkbox" class="mtc-check" data-id="${escapeHtml(r.id)}" ${checked}>
+                <div class="mtc-row" style="gap:6px">
                   <span class="mtc-badge ${recClass}">${escapeHtml(r.analysis.recommendation)}</span>
                   <span class="mtc-badge">${r.analysis.len}字</span>
                   <span class="mtc-badge">~${r.analysis.tokenEstimate}tok</span>
-                </label>
+                </div>
               </div>
               <div class="mtc-badges" style="margin-top:6px">${flags}</div>
               <div class="mtc-text" style="margin-top:8px">${escapeHtml(r.text)}</div>
@@ -1256,7 +1157,10 @@ ${JSON.stringify(records, null, 2)}`;
           return `
             <div class="mtc-card">
               <div style="font-weight:700;margin-bottom:8px">查看/编辑结果</div>
-              <div class="mtc-muted">这里不是强制人工审。你可以直接点“清理”，也可以只编辑不满意的 AI 改后内容，或让 AI 重改单条。</div>
+              <div class="mtc-muted">这里不是强制人工审。你可以直接点“应用全部结果”，也可以只编辑不满意的 AI 改后内容，或让 AI 重改单条。</div>
+              <div class="mtc-row" style="margin-top:8px">
+                <button class="primary" id="mtc-apply-all-results-top">应用当前全部结果</button>
+              </div>
               ${group("需处理", needs)}
               ${group("AI已修改", changed)}
               ${group("建议保留", keep)}
@@ -1277,7 +1181,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button id="mtc-back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2.3.3</div>
+              <div class="mtc-title">记忆低Token清理器 v2.4.4.3</div>
             </div>
 
             <div class="mtc-card">
@@ -1290,7 +1194,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1;min-width:220px">
                 <button id="mtc-use-manual-conv" ${disabled}>使用这个ID</button>
               </div>
-              <div class="mtc-muted" style="margin-top:8px">Core Memory 只读不改。v2 会优先保留事件锚点，不把记忆压成人设标签。</div>
+              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。</div>
             </div>
 
             <div class="mtc-card">
@@ -1308,21 +1212,25 @@ ${JSON.stringify(records, null, 2)}`;
 
             <div class="mtc-card">
               <div class="mtc-row">
-                <button id="mtc-ai-review" class="primary" ${disabled}>AI审查疑似记忆</button>
+                <button id="mtc-ai-review" class="primary" ${disabled}>大清洗</button>
                 <button id="mtc-quick-compress" ${disabled}>压缩过长/流水账</button>
-                <button id="mtc-apply-safe" class="primary" ${disabled}>清理${s.safe ? `(${s.safe})` : ""}</button>
-                <button id="mtc-toggle-confirm" ${disabled}>查看/编辑结果${s.totalProposals ? `(${s.totalProposals})` : ""}</button>
                 <button id="mtc-toggle-custom-instruction" class="success" ${disabled}>审查补充要求</button>
-                <button id="mtc-delete-selected" class="danger" ${disabled}>删除勾选</button>
-                <button id="mtc-scroll-top" ${disabled}>回到顶部</button>
-                <button id="mtc-scroll-bottom" ${disabled}>到底部</button>
+                <button id="mtc-toggle-confirm" ${disabled}>查看/编辑结果${s.totalProposals ? `(${s.totalProposals})` : ""}</button>
+                <button id="mtc-apply-safe" class="primary" ${disabled}>应用全部结果${s.safe ? `(${s.safe})` : ""}</button>
               </div>
               <div id="mtc-custom-instruction-panel" class="mtc-custom-panel ${state.showCustomInstruction ? "" : "hidden"}" style="margin-top:10px">
                 <div style="font-weight:700; margin-bottom:8px">本次 AI 审查补充要求</div>
                 <textarea id="mtc-custom-instruction" placeholder="例：保留地点；注意时间顺序；只压缩不删除；保留未完成承诺。">${escapeHtml(state.customInstruction || "")}</textarea>
                 <div class="mtc-field-note">仅影响本次 AI 审查。</div>
               </div>
-              <div class="mtc-muted" style="margin-top:8px">建议：Roche“最新事实注入上限”设为 3～5。点“清理”会应用 AI 建议；开启“全部执行AI建议”后不会拦截需处理项。</div>
+              <div class="mtc-muted" style="margin-top:8px;line-height:1.55">
+                建议最新事实注入上限设为 3～5。<br>
+                大清洗：扫描优先清理项，让 AI 判断保留、压缩、拆分或删除。<br>
+                压缩过长/流水账：只整理过长记忆，偏保守，不主动删除。<br>
+                审查补充要求：给本次 AI 审查临时加要求，例如保留地点、只压缩不删除。<br>
+                查看/编辑结果：查看 AI 改后的内容，可手动改、重改、删除或保留。<br>
+                应用全部结果：把当前 AI 审查结果一次性写回事实记忆。
+              </div>
             </div>
 
             ${renderConfirmPanel()}
@@ -1371,13 +1279,6 @@ ${JSON.stringify(records, null, 2)}`;
                 <div class="mtc-muted" style="margin-top:8px">如果 Roche 不支持删除 vector，会显示失败数量。</div>
               </div>` : ""}
 
-            <div class="mtc-card">
-              <div class="mtc-row">
-                <button id="mtc-select-flagged" ${disabled}>勾选疑似</button>
-                <button id="mtc-clear-select" ${disabled}>取消勾选</button>
-                <span class="mtc-muted">已勾选 ${state.selected.size} 条</span>
-              </div>
-            </div>
 
             <div class="mtc-list">${s.rows.map(r => renderFact(r)).join("") || `<div class="mtc-card mtc-muted">暂无事实记忆。请先读取会话记忆。</div>`}</div>
 
@@ -1408,30 +1309,16 @@ ${JSON.stringify(records, null, 2)}`;
           root.querySelector("#mtc-ai-review")?.addEventListener("click", () => { state.reviewMode = "review"; reviewWithAi(); });
           root.querySelector("#mtc-quick-compress")?.addEventListener("click", quickCompressFlagged);
           root.querySelector("#mtc-apply-safe")?.addEventListener("click", applySafeProposals);
+          root.querySelector("#mtc-apply-all-results-top")?.addEventListener("click", applySafeProposals);
           root.querySelector("#mtc-toggle-confirm")?.addEventListener("click", () => { state.showConfirmPanel = !state.showConfirmPanel; render(); });
           root.querySelector("#mtc-toggle-custom-instruction")?.addEventListener("click", () => {
             state.showCustomInstruction = !state.showCustomInstruction;
             const panel = root.querySelector("#mtc-custom-instruction-panel");
             if (panel) panel.classList.toggle("hidden", !state.showCustomInstruction);
           });
-          root.querySelector("#mtc-delete-selected")?.addEventListener("click", deleteSelected);
-          root.querySelector("#mtc-scroll-top")?.addEventListener("click", () => root.scrollTo({ top: 0, behavior: "smooth" }));
-          root.querySelector("#mtc-scroll-bottom")?.addEventListener("click", () => root.scrollTo({ top: root.scrollHeight, behavior: "smooth" }));
           root.querySelector("#mtc-save-settings")?.addEventListener("click", saveSettingsFromUi);
           root.querySelector("#mtc-restore-defaults")?.addEventListener("click", restoreDefaultSettings);
           root.querySelector("#mtc-delete-vectors")?.addEventListener("click", tryDeleteVectors);
-          root.querySelector("#mtc-select-flagged")?.addEventListener("click", () => {
-            currentRows().forEach(r => {
-              if (r.analysis.priority) state.selected.add(r.id);
-            });
-            render();
-          });
-          root.querySelector("#mtc-clear-select")?.addEventListener("click", () => { state.selected.clear(); render(); });
-          root.querySelectorAll(".mtc-check").forEach(cb => cb.addEventListener("change", e => {
-            const id = e.target.dataset.id;
-            if (e.target.checked) state.selected.add(id); else state.selected.delete(id);
-            render();
-          }));
           root.querySelectorAll(".mtc-switch-button").forEach(btn => btn.addEventListener("click", () => {
             const key = btn.dataset.settingKey;
             if (!key || !(key in state.settings)) return;
