@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.2.0";
+  const VERSION = "3.3.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -286,50 +286,111 @@
     return out;
   }
 
-  function parseDateTimeValue(text) {
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  function normalizeNumericDatePart(text) {
+    const t = String(text || "").trim();
+    const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?/);
+    if (full) {
+      const y = full[1], m = pad2(full[2]), d = pad2(full[3]);
+      const time = full[4] ? ` ${pad2(full[4])}:${pad2(full[5] || 0)}` : "";
+      return `${y}-${m}-${d}${time}`;
+    }
+    const month = t.match(/(20\d{2})[-/年.](\d{1,2})(?:月)?/);
+    if (month) return `${month[1]}-${pad2(month[2])}`;
+    const year = t.match(/\b(20\d{2})\b/);
+    if (year) return year[1];
+    return "";
+  }
+
+  function endOfMonth(year, monthIndex0) {
+    return new Date(year, monthIndex0 + 1, 0, 23, 59, 59).getTime();
+  }
+
+  function parseSingleDateTimeValue(text, preferEnd = false) {
     const t = String(text || "");
     const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?/);
     if (full) {
       const y = Number(full[1]), m = Number(full[2]), d = Number(full[3]);
-      const hh = full[4] ? Number(full[4]) : 0;
-      const mm = full[5] ? Number(full[5]) : 0;
+      const hh = full[4] ? Number(full[4]) : (preferEnd ? 23 : 0);
+      const mm = full[5] ? Number(full[5]) : (preferEnd ? 59 : 0);
       const time = new Date(y, m - 1, d, hh, mm).getTime();
       if (Number.isFinite(time)) return time;
     }
-    const md = t.match(/(\d{1,2})月(\d{1,2})日/);
-    if (md) {
-      const now = new Date();
-      const y = now.getFullYear();
-      const time = new Date(y, Number(md[1]) - 1, Number(md[2])).getTime();
+    const month = t.match(/(20\d{2})[-/年.](\d{1,2})(?:月)?/);
+    if (month) {
+      const y = Number(month[1]), m = Number(month[2]);
+      const time = preferEnd ? endOfMonth(y, m - 1) : new Date(y, m - 1, 1).getTime();
+      if (Number.isFinite(time)) return time;
+    }
+    const year = t.match(/\b(20\d{2})\b/);
+    if (year) {
+      const y = Number(year[1]);
+      const time = preferEnd ? new Date(y, 11, 31, 23, 59, 59).getTime() : new Date(y, 0, 1).getTime();
       if (Number.isFinite(time)) return time;
     }
     return Infinity;
   }
 
+  function parseDateTimeValue(text) {
+    const t = sanitizeWhen(text);
+    if (!t) return Infinity;
+    const parts = t.split(/\s*->\s*/).map(x => x.trim()).filter(Boolean);
+    const target = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+    return parseSingleDateTimeValue(target, true);
+  }
+
+  function sanitizeWhen(text) {
+    const raw = String(text || "").trim();
+    if (!raw) return "";
+    const fuzzy = /(上午|下午|早晨|清晨|中午|晚上|夜里|凌晨|傍晚|上旬|中旬|下旬|月初|月中|月末|那天|那段时间|后来|同一阶段|离港前后|早期相处|香港最后一天|离开前后|早期|最初|近期|最近|之后|以前|以前后|前后|期间)/;
+    const range = raw.match(/(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)?)\s*(?:->|至|到|—|–|~|～)\s*(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)?)/);
+    if (range) {
+      const a = normalizeNumericDatePart(range[1]);
+      const b = normalizeNumericDatePart(range[2]);
+      return a && b ? `${a} -> ${b}` : "";
+    }
+    const allFull = raw.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?/g);
+    if (allFull && allFull.length >= 2) {
+      const a = normalizeNumericDatePart(allFull[0]);
+      const b = normalizeNumericDatePart(allFull[allFull.length - 1]);
+      return a && b && a !== b ? `${a} -> ${b}` : (a || "");
+    }
+    if (allFull && allFull.length === 1) return normalizeNumericDatePart(allFull[0]);
+    const month = raw.match(/20\d{2}[-/年.]\d{1,2}(?:月)?/);
+    if (month && !fuzzy.test(raw)) return normalizeNumericDatePart(month[0]);
+    const year = raw.match(/\b20\d{2}\b/);
+    if (year && !fuzzy.test(raw)) return year[0];
+    return "";
+  }
+
   function inferWhenFromText(text) {
     const t = String(text || "");
-    const range = t.match(/(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)\s*(?:->|至|到|-)\s*(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)/);
-    if (range) return `${range[1]} -> ${range[2]}`;
-    const full = t.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?/);
-    if (full) return full[0];
-    const md = t.match(/\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|早晨|中午|晚上|夜里)?)?/);
-    if (md) return md[0];
-    const phase = t.match(/(?:六月|七月|八月|九月|十月|十一月|十二月|一月|二月|三月|四月|五月|那段时间|离港前后|早期相处|香港最后一天|离开前后)/);
-    return phase ? phase[0] : "";
+    const range = t.match(/(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)\s*(?:->|至|到|—|–|~|～)\s*(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)/);
+    if (range) return sanitizeWhen(`${range[1]} -> ${range[2]}`);
+    const allFull = t.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?/g);
+    if (allFull && allFull.length >= 2) return sanitizeWhen(`${allFull[0]} -> ${allFull[allFull.length - 1]}`);
+    if (allFull && allFull.length === 1) return sanitizeWhen(allFull[0]);
+    const month = t.match(/20\d{2}[-/年.]\d{1,2}(?:月)?/);
+    if (month) return sanitizeWhen(month[0]);
+    const year = t.match(/\b20\d{2}\b/);
+    return year ? year[0] : "";
   }
 
   function extractEventTime(text, item = null) {
     const when = item ? getFactWhen(item) : "";
     const fromWhen = parseDateTimeValue(when);
     if (Number.isFinite(fromWhen)) return fromWhen;
-    return parseDateTimeValue(text);
+    return parseDateTimeValue(inferWhenFromText(text));
   }
 
   function buildMemoryPayload(text, sourceItem = null, overrides = {}) {
     const body = String(text || "").trim();
     const sourceText = sourceItem ? getFactText(sourceItem) : "";
     const who = firstNonEmpty(overrides.who, sourceItem && getFactWho(sourceItem), "线上摘要");
-    const when = firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(body), inferWhenFromText(sourceText));
+    const when = sanitizeWhen(firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(body), inferWhenFromText(sourceText)));
     const where = firstNonEmpty(overrides.where, sourceItem && getFactWhere(sourceItem));
     const how = firstNonEmpty(overrides.how, sourceItem && getFactHow(sourceItem));
     return {
@@ -422,7 +483,7 @@
     return `你是 Roche 事实记忆清理器。你不是在写剧情总结，也不是在重写人设。你的任务是把长流水账整理成少量可召回的事件记忆。
 
 本次模式：
-${compressOnly ? "仅压缩过长/流水账。只能返回 KEEP 或 COMPRESS，不能返回 DELETE 或 SPLIT。" : "完整审查。可以返回 KEEP、COMPRESS、SPLIT、DELETE。"}
+${compressOnly ? "仅压缩过长/流水账。只能返回 KEEP 或 COMPRESS，不能返回 DELETE、SPLIT 或 MERGE_REPLACE。" : "完整审查。可以返回 KEEP、COMPRESS、SPLIT、MERGE_REPLACE、DELETE。"}
 
 最高原则：
 把长流水账整理成少量可召回的事件记忆；优先保留关系后果、边界、承诺、地点、关键物品与关键称呼；删除重复噪音；不要把记忆写成人设归纳或小说摘要。
@@ -448,6 +509,14 @@ SPLIT 拆分规则：
 4. 每条拆分结果必须能单独回答：发生了什么、为什么重要、以后为什么会被召回。
 5. 如果信息只是同一事件的连续细节，应该 COMPRESS 成一条，不要 SPLIT。
 
+MERGE 合并规则：
+1. MERGE_REPLACE 用于把多条事实记忆合并成一条完整事实，并删除碎片记忆。
+2. 允许跨天合并，但只允许合并同一条已经闭环的事件线，例如同一冲突、同一承诺、同一行程、同一关系节点或同一未完成问题的连续推进。
+3. 不要按日期合并。不要因为同一天或时间接近就合并主题不同的记忆。
+4. 合并后不能丢失关键边界、承诺、关系后果、地点、关键物品或关键称呼。
+5. 如果其中任何一条未来可能需要单独召回，优先分别 COMPRESS，不要 MERGE_REPLACE。
+6. MERGE_REPLACE 的 when 写事件线起点到闭环点，例如 2026-06-20 -> 2026-06-23；排序会按结束时间处理。
+
 关键词规则：
 1. 每条新记忆的关键词只允许来自该条内容。
 2. 禁止把同一组关键词复制给所有拆分条目。
@@ -466,7 +535,17 @@ SPLIT 拆分规则：
 KEEP：保留，不改。
 COMPRESS：单条事件仍有价值，但太长或流水账，压成一条事件记忆。
 SPLIT：一条旧记忆包含 2-3 个独立重要事件，拆成 2-3 条事件记忆。
+MERGE_REPLACE：多条事实属于同一条已经闭环的事件线，合并为一条完整事实。
 DELETE：无长期后果、重复、过时、低价值，应遗忘。
+
+
+结构字段规则：
+1. who/where/how 可以是自然语言短语。
+2. when 是机器排序字段，只能输出数字日期或数字日期范围。
+3. when 允许格式：2026-06-20、2026-06-20 22:14、2026-06-20 -> 2026-06-23、2026-06、2026。
+4. when 绝对不能出现：上午、下午、早晨、中午、晚上、上旬、中旬、下旬、月初、月中、月末、那段时间、后来、离港前后、早期相处、香港最后一天。
+5. 模糊阶段词只能写进 what/newText 正文，不能写进 when。
+6. 如果无法确定数字日期，when 留空。
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
@@ -475,8 +554,9 @@ ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
   "items": [
     {
       "id": "原id",
-      "action": "KEEP|COMPRESS${compressOnly ? "" : "|SPLIT|DELETE"}",
-      "newText": "COMPRESS时填写；其他动作可空",
+      "action": "KEEP|COMPRESS${compressOnly ? "" : "|SPLIT|MERGE_REPLACE|DELETE"}",
+      "sourceIds": ["MERGE_REPLACE时填写，被合并的原id列表"],
+      "newText": "COMPRESS或MERGE_REPLACE时填写；其他动作可空",
       "newItems": [{"text":"SPLIT时的新记忆1","keywords":["本条关键词1"]}],
       "keywords": ["COMPRESS或DELETE时的具体关键词"],
       "risk": "safe|confirm",
@@ -498,6 +578,11 @@ ${JSON.stringify(records, null, 2)}`;
     return `用户不想拆分或删除这条事实记忆。请把它改为单条压缩记忆，抹去次要细节，只保留最重要的长期事件轮廓。不要 SPLIT，不要 DELETE。不要添加原文没有的信息。
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
+
+结构字段规则：
+when 是机器排序字段，只能输出数字日期或数字日期范围，如 2026-06-20、2026-06-20 -> 2026-06-23、2026-06。
+when 绝对不能出现上午、下午、上旬、中旬、下旬、那段时间、离港前后等模糊词。模糊词只能写进正文。
+无法确定数字日期时，when 留空。
 
 只返回严格 JSON 对象：
 {
@@ -529,7 +614,7 @@ ${JSON.stringify(record, null, 2)}`;
 2. 可以按同一段时间合并多条不同事件线，例如家庭线、金钱线、冲突线、离别线，只要它们确实属于同一阶段。
 3. 合并后的记忆要像一段朴素叙事：地点、人物、主要事件、关系后果。
 4. 不要写成文艺描写，不要写天气、气氛、心理渲染。
-5. 模糊具体日期时间，不要写几月几日、几点、早晨、中午、晚上。可以写“那段时间”“后来”“同一阶段”“六月里”“离开前后”“早期相处里”等。
+5. 归档正文可以模糊具体日期时间，可以写“那段时间”“后来”“同一阶段”“六月里”“离开前后”“早期相处里”等；但 when 字段不能写这些词。
 6. 不要补原文没有的信息。
 7. 如果旧事实只是重复小互动、普通调情、表情包、无后果照片，可以 DELETE。
 8. 如果内容仍然太重要、不能减退，返回 KEEP。
@@ -539,6 +624,13 @@ ${JSON.stringify(record, null, 2)}`;
 - 阶段归档：允许把同一段时间的多条线合成 1-3 条阶段叙事。
 - 输出每条归档记忆 120-260 中文字。
 - 关键词要少而具体，2-5 个。
+
+结构字段规则：
+1. when 是机器排序字段，只能输出数字日期或数字日期范围。
+2. when 允许格式：2026-06、2026-06-01 -> 2026-06-30、2026。
+3. when 绝对不能出现：上午、下午、早晨、中午、晚上、上旬、中旬、下旬、月初、月中、月末、那段时间、后来、离港前后、早期相处、香港最后一天。
+4. 模糊阶段词只能写进 archiveText 正文，不能写进 when。
+5. 如果无法确定数字日期，when 留空。
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
@@ -552,7 +644,7 @@ ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
       "keywords": ["具体关键词1","具体关键词2"],
       "reason": "不超过18字",
       "who": "可选，人物",
-      "when": "可选，模糊阶段时间",
+      "when": "可选，只能是数字日期或数字日期范围，例如 2026-06 或 2026-06-01 -> 2026-06-30；不能写六月里/离港前后/上中下旬",
       "where": "可选，地点",
       "how": "可选，方式/状态"
     }
@@ -600,15 +692,34 @@ ${JSON.stringify(records, null, 2)}`;
   }
 
   function normalizeProposal(p, factMap, settings, mode = "review") {
-    const id = String(p?.id || "").trim();
     let action = String(p?.action || "KEEP").trim().toUpperCase();
     if (mode === "compressOnly" && !["KEEP","COMPRESS"].includes(action)) action = "COMPRESS";
-    if (!["KEEP","COMPRESS","SPLIT","DELETE"].includes(action)) action = "KEEP";
-    if (!factMap.has(id)) action = "KEEP";
+    if (!["KEEP","COMPRESS","SPLIT","MERGE_REPLACE","DELETE"].includes(action)) action = "KEEP";
 
-    const original = factMap.get(id)?.text || "";
+    let sourceIds = unique(p?.sourceIds || p?.ids || []);
+    let id = String(p?.id || "").trim();
+    if (!sourceIds.length && id) sourceIds = [id];
+    sourceIds = sourceIds.filter(x => factMap.has(x));
+
+    if (action !== "MERGE_REPLACE") {
+      id = sourceIds[0] || id;
+      if (!factMap.has(id)) action = "KEEP";
+      sourceIds = [id].filter(Boolean);
+    }
+
+    if (action === "MERGE_REPLACE") {
+      if (sourceIds.length < 2) {
+        action = "COMPRESS";
+        id = sourceIds[0] || id;
+        sourceIds = [id].filter(Boolean);
+      } else {
+        id = makeProposalId("merge");
+      }
+    }
+
+    const original = factMap.get(id)?.text || (sourceIds.map(sid => factMap.get(sid)?.text).filter(Boolean).join("\n"));
     const keywords = unique(p?.keywords || []).slice(0, settings.keywordLimit);
-    let newText = String(p?.newText || "").trim();
+    let newText = String(p?.newText || p?.mergeText || p?.text || "").trim();
     let newItems = normalizeSplitItems(p?.newItems, keywords);
     let reason = String(p?.reason || "").trim().slice(0, 40);
 
@@ -629,6 +740,17 @@ ${JSON.stringify(records, null, 2)}`;
       if (charLen(newText) >= charLen(original)) {
         needsManual = true;
         manualReasons.push("未有效压缩");
+      }
+    }
+
+    if (action === "MERGE_REPLACE") {
+      if (!newText) {
+        needsManual = true;
+        manualReasons.push("合并为空");
+      }
+      if (sourceIds.length < 2) {
+        needsManual = true;
+        manualReasons.push("合并来源不足");
       }
     }
 
@@ -655,14 +777,14 @@ ${JSON.stringify(records, null, 2)}`;
     if (needsManual) risk = "confirm";
 
     return {
-      id, sourceIds: [id], action, newText, newItems, keywords,
+      id, sourceIds, action, newText, newItems, keywords,
       reason: manualReasons[0] || reason,
       risk, needsManual,
       who: String(p?.who || "").trim(),
-      when: String(p?.when || "").trim(),
+      when: sanitizeWhen(p?.when || ""),
       where: String(p?.where || "").trim(),
       how: String(p?.how || "").trim(),
-      type: "fact"
+      type: action === "MERGE_REPLACE" ? "merge" : "fact"
     };
   }
 
@@ -694,7 +816,7 @@ ${JSON.stringify(records, null, 2)}`;
       risk: needsManual ? "confirm" : "safe",
       needsManual,
       who: String(p?.who || "").trim(),
-      when: String(p?.when || "").trim(),
+      when: sanitizeWhen(p?.when || ""),
       where: String(p?.where || "").trim(),
       how: String(p?.how || "").trim(),
       type: "archive"
@@ -911,7 +1033,7 @@ ${JSON.stringify(records, null, 2)}`;
             const isKnown = oldHash === hash || hashKnown;
             const isChanged = !!oldHash && oldHash !== hash;
             const isNew = !oldHash && !hashKnown;
-            const when = getFactWhen(item);
+            const when = sanitizeWhen(getFactWhen(item));
             return {
               id, item, text, hash, oldHash, hashKnown, isKnown, isChanged, isNew, index,
               who: getFactWho(item),
@@ -1014,15 +1136,21 @@ ${JSON.stringify(records, null, 2)}`;
           setBusy(true);
           try {
             let count = 0;
-            for (let i = 0; i < rows.length; i += state.settings.batchSize) {
-              const batch = rows.slice(i, i + state.settings.batchSize);
+            const effectiveBatchSize = (workflow === "washAll" && mode === "review") ? Math.max(state.settings.batchSize, 6) : state.settings.batchSize;
+            const orderedRows = (workflow === "washAll" && mode === "review")
+              ? rows.slice().sort((a, b) => (a.eventTime - b.eventTime) || (a.index - b.index))
+              : rows;
+            for (let i = 0; i < orderedRows.length; i += effectiveBatchSize) {
+              const batch = orderedRows.slice(i, i + effectiveBatchSize);
               const records = batch.map(r => ({
                 id: r.id,
                 text: r.text,
+                when: r.when,
+                where: r.where,
                 localFlags: r.analysis.flags,
                 localRecommendation: r.analysis.recommendation
               }));
-              log(`AI处理第 ${Math.floor(i / state.settings.batchSize) + 1} 批，共 ${records.length} 条。`);
+              log(`AI处理第 ${Math.floor(i / effectiveBatchSize) + 1} 批，共 ${records.length} 条。`);
               const raw = await askAiForReview(roche, records, state.settings, state.customInstruction, mode);
               const factMap = new Map(currentRows().map(r => [r.id, r]));
               raw.map(p => normalizeProposal(p, factMap, state.settings, mode)).forEach(p => {
@@ -1043,7 +1171,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function washAll() {
-          await reviewRows(currentRows(), "review");
+          await reviewRows(currentRows(), "review", "washAll");
         }
 
         async function cleanNew() {
@@ -1128,6 +1256,15 @@ ${JSON.stringify(records, null, 2)}`;
             return p;
           }
 
+          if (p.type === "merge") {
+            const el = root.querySelector(`textarea[data-role="merge"][data-id="${CSS.escape(id)}"]`);
+            if (el) {
+              p.newText = el.value.trim();
+              p.keywords = [];
+            }
+            return p;
+          }
+
           if (p.action === "COMPRESS") {
             const el = root.querySelector(`textarea[data-role="compress"][data-id="${CSS.escape(id)}"]`);
             if (el) {
@@ -1153,9 +1290,11 @@ ${JSON.stringify(records, null, 2)}`;
 
         function proposalEventTime(p) {
           if (!p) return Infinity;
-          if (p.type === "archive") {
+          if (p.type === "archive" || p.type === "merge") {
+            const fromWhen = parseDateTimeValue(p.when || p.archiveText || p.newText);
+            if (Number.isFinite(fromWhen)) return fromWhen;
             const first = (p.sourceIds || []).map(id => currentRows().find(r => r.id === id)).find(Boolean);
-            return first ? first.eventTime : parseDateTimeValue(p.when || p.archiveText);
+            return first ? first.eventTime : Infinity;
           }
           const row = currentRows().find(r => r.id === p.id);
           const fromProposal = parseDateTimeValue(p.when || p.newText || "");
@@ -1186,6 +1325,15 @@ ${JSON.stringify(records, null, 2)}`;
             return "检测到本次维护里有早于现有最新事实的时间；局部重排只能整理本批顺序，完成后建议再用“修复记忆顺序”。";
           }
           return "";
+        }
+
+        function mergeWhenFromRows(rows) {
+          const sorted = (rows || []).filter(r => Number.isFinite(r.eventTime)).sort((a, b) => a.eventTime - b.eventTime);
+          if (!sorted.length) return "";
+          const first = sanitizeWhen(sorted[0].when || inferWhenFromText(sorted[0].text));
+          const last = sanitizeWhen(sorted[sorted.length - 1].when || inferWhenFromText(sorted[sorted.length - 1].text));
+          if (first && last && first !== last) return `${first} -> ${last}`;
+          return first || last || "";
         }
 
         async function applyOneProposal(p, options = {}) {
@@ -1227,6 +1375,34 @@ ${JSON.stringify(records, null, 2)}`;
                 });
                 return "archive";
               }
+            }
+            return "skip";
+          }
+
+
+          if (p.type === "merge") {
+            const sourceRows = (p.sourceIds || []).map(id => currentRows().find(r => r.id === id)).filter(Boolean);
+            const firstRow = sourceRows.slice().sort((a, b) => (a.eventTime - b.eventTime) || (a.index - b.index))[0];
+            const text = finalMemoryText(p.newText, p.keywords, state.settings);
+
+            if (p.action === "DELETE") {
+              for (const row of sourceRows) await roche.memory.delete(row.id);
+              return "delete";
+            }
+
+            if (p.action === "MERGE_REPLACE") {
+              if (!firstRow || !text) return "skip";
+              const rangeWhen = sanitizeWhen(p.when || mergeWhenFromRows(sourceRows));
+              await updateMemory(firstRow.id, text, firstRow.item, {
+                who: p.who || firstRow.who,
+                when: rangeWhen || firstRow.when || inferWhenFromText(text),
+                where: p.where || firstRow.where,
+                how: p.how || firstRow.how
+              });
+              for (const row of sourceRows) {
+                if (row.id !== firstRow.id) await roche.memory.delete(row.id);
+              }
+              return "merge";
             }
             return "skip";
           }
@@ -1328,7 +1504,7 @@ ${JSON.stringify(records, null, 2)}`;
 
           setBusy(true);
           try {
-            const done = { compress:0, delete:0, split:0, archive:0, reorder:0, skip:0 };
+            const done = { compress:0, delete:0, split:0, archive:0, merge:0, reorder:0, skip:0 };
             for (const p of proposals) {
               const r = await applyOneProposal(p, { touchKeep: isCleanNew });
               if (r === "compress") done.compress++;
@@ -1336,6 +1512,7 @@ ${JSON.stringify(records, null, 2)}`;
               else if (r === "reorder") done.reorder++;
               else if (r.startsWith("split")) done.split++;
               else if (r.startsWith("archive")) done.archive++;
+              else if (r === "merge") done.merge++;
               else done.skip++;
             }
             await loadMemory({ silent: true });
@@ -1343,8 +1520,8 @@ ${JSON.stringify(records, null, 2)}`;
             state.proposals.clear();
             state.showResults = false;
             state.workflow = "";
-            roche.ui.toast(`完成：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}。`);
-            log(`已应用全部结果：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}，跳过 ${done.skip}。${warning ? " " + warning : ""}`);
+            roche.ui.toast(`完成：压缩 ${done.compress}，拆分 ${done.split}，合并 ${done.merge}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}。`);
+            log(`已应用全部结果：压缩 ${done.compress}，拆分 ${done.split}，合并 ${done.merge}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}，跳过 ${done.skip}。${warning ? " " + warning : ""}`);
             render();
           } catch (err) {
             roche.ui.toast("应用失败：" + (err?.message || err));
@@ -1591,6 +1768,29 @@ ${JSON.stringify(records, null, 2)}`;
           `;
         }
 
+        function renderMergeProposal(p, factMap) {
+          const sourceText = (p.sourceIds || []).map(id => factMap.get(id)?.text).filter(Boolean);
+          return `
+            <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+              <div class="mtc-badges">
+                ${actionBadge(p)}
+                <span class="mtc-badge">合并 ${p.sourceIds.length} 条</span>
+                ${p.when ? `<span class="mtc-badge">when: ${escapeHtml(p.when)}</span>` : ""}
+                ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
+              </div>
+              <details style="margin-top:8px">
+                <summary class="mtc-muted">来源记忆</summary>
+                ${sourceText.map((t, i) => `<div class="mtc-text" style="margin-top:6px">${i + 1}. ${escapeHtml(t)}</div>`).join("")}
+              </details>
+              ${p.action === "DELETE" ? `<div class="mtc-proposal"><div class="mtc-text">已标记删除这些来源记忆。</div></div>` : `
+                <div class="mtc-muted" style="margin-top:8px">合并后的完整事实，可编辑</div>
+                <textarea class="mtc-edit-text" data-role="merge" data-id="${escapeHtml(p.id)}">${escapeHtml(finalMemoryText(p.newText, p.keywords, state.settings))}</textarea>
+              `}
+              ${renderCardActions(p)}
+            </div>
+          `;
+        }
+
         function renderFactProposal(p, factMap) {
           const original = factMap.get(p.id)?.text || "";
           const isKeep = p.action === "KEEP";
@@ -1633,10 +1833,11 @@ ${JSON.stringify(records, null, 2)}`;
         function renderCardActions(p) {
           const id = escapeHtml(p.id);
           const isArchive = p.type === "archive";
-          const canCompress = !isArchive && (p.action === "SPLIT" || p.action === "DELETE");
+          const isGrouped = p.type === "archive" || p.type === "merge";
+          const canCompress = !isGrouped && (p.action === "SPLIT" || p.action === "DELETE");
           return `
             <div class="mtc-row" style="margin-top:8px">
-              ${!isArchive ? `<button type="button" data-action="rerun" data-id="${id}">让AI重改</button>` : ""}
+              ${!isGrouped ? `<button type="button" data-action="rerun" data-id="${id}">让AI重改</button>` : ""}
               ${canCompress ? `<button type="button" data-action="single-compress" data-id="${id}">改为单条压缩</button>` : ""}
               <button type="button" data-action="mark-keep" data-id="${id}">保留原文</button>
               <button type="button" class="danger" data-action="mark-delete" data-id="${id}">删除这条</button>
@@ -1657,7 +1858,7 @@ ${JSON.stringify(records, null, 2)}`;
             if (!items.length) return "";
             return `
               <div class="mtc-mini-title">${escapeHtml(title)} ${items.length} 条</div>
-              ${items.map(p => p.type === "archive" ? renderArchiveProposal(p, factMap) : renderFactProposal(p, factMap)).join("")}
+              ${items.map(p => p.type === "archive" ? renderArchiveProposal(p, factMap) : (p.type === "merge" ? renderMergeProposal(p, factMap) : renderFactProposal(p, factMap))).join("")}
             `;
           };
 
@@ -1691,7 +1892,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.2</div>
+              <div class="mtc-title">记忆低Token清理器 v3.3</div>
             </div>
 
             <div class="mtc-card">
@@ -1727,7 +1928,7 @@ ${JSON.stringify(records, null, 2)}`;
                   <b>压缩过长/流水账</b><span>只整理过长或流水账，偏保守，不主动删除。</span>
                 </button>
                 <button type="button" class="mtc-action act-wash" data-action="wash-all" ${disabled}>
-                  <b>大清洗</b><span>全库扫描，动作最重，可能保留、压缩、拆分或删除。</span>
+                  <b>大清洗</b><span>全库扫描，动作最重，可能保留、压缩、拆分、合并或删除。</span>
                 </button>
                 <button type="button" class="mtc-action act-archive" data-action="archive-old" ${disabled}>
                   <b>旧记忆归档</b><span>记忆减退，把旧记忆合并成阶段叙事，属于特殊整理。</span>
@@ -1754,7 +1955,7 @@ ${JSON.stringify(records, null, 2)}`;
 
               <div class="mtc-muted" style="margin-top:8px;line-height:1.55">
                 建议最新事实注入上限设为 3～5。<br>
-                清理新增会按本次维护的 when 自动局部重排；执行大清洗、压缩过长/流水账、旧记忆归档，或应用包含旧记忆拆分/归档/新建的结果后，建议使用“修复记忆顺序”。
+                清理新增会按本次维护的 when 自动局部重排；执行大清洗、压缩过长/流水账、旧记忆归档，或应用包含旧记忆拆分/合并/归档/新建的结果后，建议使用“修复记忆顺序”。
               </div>
             </div>
 
