@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.7.0";
+  const VERSION = "3.2.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -55,7 +55,31 @@
   }
 
   function getFactText(item) {
-    return String(item?.summaryText || item?.action || item?.text || item?.content || "").trim();
+    return String(item?.what || item?.summaryText || item?.action || item?.text || item?.content || "").trim();
+  }
+
+  function getFactWho(item) {
+    return String(item?.who || item?.subject || item?.person || item?.人物 || "").trim();
+  }
+
+  function getFactWhen(item) {
+    return String(item?.when || item?.time || item?.date || item?.时间 || "").trim();
+  }
+
+  function getFactWhere(item) {
+    return String(item?.where || item?.location || item?.place || item?.地点 || "").trim();
+  }
+
+  function getFactHow(item) {
+    return String(item?.how || item?.method || item?.方式 || "").trim();
+  }
+
+  function firstNonEmpty(...values) {
+    for (const v of values) {
+      const s = String(v || "").trim();
+      if (s) return s;
+    }
+    return "";
   }
 
   function estimateTokens(text) {
@@ -262,12 +286,14 @@
     return out;
   }
 
-  function extractEventTime(text) {
+  function parseDateTimeValue(text) {
     const t = String(text || "");
-    const iso = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})/);
-    if (iso) {
-      const y = Number(iso[1]), m = Number(iso[2]), d = Number(iso[3]);
-      const time = new Date(y, m - 1, d).getTime();
+    const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?/);
+    if (full) {
+      const y = Number(full[1]), m = Number(full[2]), d = Number(full[3]);
+      const hh = full[4] ? Number(full[4]) : 0;
+      const mm = full[5] ? Number(full[5]) : 0;
+      const time = new Date(y, m - 1, d, hh, mm).getTime();
       if (Number.isFinite(time)) return time;
     }
     const md = t.match(/(\d{1,2})月(\d{1,2})日/);
@@ -278,6 +304,60 @@
       if (Number.isFinite(time)) return time;
     }
     return Infinity;
+  }
+
+  function inferWhenFromText(text) {
+    const t = String(text || "");
+    const range = t.match(/(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)\s*(?:->|至|到|-)\s*(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)/);
+    if (range) return `${range[1]} -> ${range[2]}`;
+    const full = t.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?/);
+    if (full) return full[0];
+    const md = t.match(/\d{1,2}月\d{1,2}日(?:\s*(?:上午|下午|早晨|中午|晚上|夜里)?)?/);
+    if (md) return md[0];
+    const phase = t.match(/(?:六月|七月|八月|九月|十月|十一月|十二月|一月|二月|三月|四月|五月|那段时间|离港前后|早期相处|香港最后一天|离开前后)/);
+    return phase ? phase[0] : "";
+  }
+
+  function extractEventTime(text, item = null) {
+    const when = item ? getFactWhen(item) : "";
+    const fromWhen = parseDateTimeValue(when);
+    if (Number.isFinite(fromWhen)) return fromWhen;
+    return parseDateTimeValue(text);
+  }
+
+  function buildMemoryPayload(text, sourceItem = null, overrides = {}) {
+    const body = String(text || "").trim();
+    const sourceText = sourceItem ? getFactText(sourceItem) : "";
+    const who = firstNonEmpty(overrides.who, sourceItem && getFactWho(sourceItem), "线上摘要");
+    const when = firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(body), inferWhenFromText(sourceText));
+    const where = firstNonEmpty(overrides.where, sourceItem && getFactWhere(sourceItem));
+    const how = firstNonEmpty(overrides.how, sourceItem && getFactHow(sourceItem));
+    return {
+      who,
+      when,
+      where,
+      how,
+      what: body,
+      summaryText: body,
+      action: body,
+      text: body,
+      content: body,
+      source: "plugin_memory_token_cleaner_v3"
+    };
+  }
+
+  function cloneFactForBackup(row) {
+    const item = row?.item || {};
+    return {
+      id: row?.id || getMemoryId(item),
+      hash: row?.hash || hashText(getFactText(item)),
+      who: getFactWho(item),
+      when: getFactWhen(item),
+      where: getFactWhere(item),
+      how: getFactHow(item),
+      what: getFactText(item),
+      raw: item
+    };
   }
 
   function makeProposalId(prefix) {
@@ -400,7 +480,11 @@ ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
       "newItems": [{"text":"SPLIT时的新记忆1","keywords":["本条关键词1"]}],
       "keywords": ["COMPRESS或DELETE时的具体关键词"],
       "risk": "safe|confirm",
-      "reason": "不超过18字"
+      "reason": "不超过18字",
+      "who": "可选，人物",
+      "when": "可选，时间段",
+      "where": "可选，地点",
+      "how": "可选，方式/状态"
     }
   ]
 }
@@ -423,7 +507,11 @@ ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
       "action": "COMPRESS",
       "newText": "单条压缩后的事实记忆",
       "keywords": ["具体关键词1","具体关键词2"],
-      "reason": "不超过18字"
+      "reason": "不超过18字",
+      "who": "可选，人物",
+      "when": "可选，时间段",
+      "where": "可选，地点",
+      "how": "可选，方式/状态"
     }
   ]
 }
@@ -462,7 +550,11 @@ ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
       "action": "ARCHIVE_REPLACE|ARCHIVE_KEEP|DELETE|KEEP",
       "archiveText": "ARCHIVE时填写阶段叙事",
       "keywords": ["具体关键词1","具体关键词2"],
-      "reason": "不超过18字"
+      "reason": "不超过18字",
+      "who": "可选，人物",
+      "when": "可选，模糊阶段时间",
+      "where": "可选，地点",
+      "how": "可选，方式/状态"
     }
   ]
 }
@@ -566,6 +658,10 @@ ${JSON.stringify(records, null, 2)}`;
       id, sourceIds: [id], action, newText, newItems, keywords,
       reason: manualReasons[0] || reason,
       risk, needsManual,
+      who: String(p?.who || "").trim(),
+      when: String(p?.when || "").trim(),
+      where: String(p?.where || "").trim(),
+      how: String(p?.how || "").trim(),
       type: "fact"
     };
   }
@@ -597,6 +693,10 @@ ${JSON.stringify(records, null, 2)}`;
       reason,
       risk: needsManual ? "confirm" : "safe",
       needsManual,
+      who: String(p?.who || "").trim(),
+      when: String(p?.when || "").trim(),
+      where: String(p?.where || "").trim(),
+      how: String(p?.how || "").trim(),
       type: "archive"
     };
   }
@@ -625,6 +725,7 @@ ${JSON.stringify(records, null, 2)}`;
         --mtc-yellow:#fff2c8; --mtc-yellow-border:#e8c75d;
         --mtc-slate:#e7edf5; --mtc-slate-border:#b9c6d8;
         --mtc-deep:#cfeedd; --mtc-deep-border:#73b98d;
+        --mtc-order:#ffe1e1; --mtc-order-border:#d98f8f;
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         color: var(--mtc-text); background: var(--mtc-bg);
         position:absolute; inset:0; display:block;
@@ -645,6 +746,7 @@ ${JSON.stringify(records, null, 2)}`;
           --mtc-yellow:rgba(230,180,60,.24); --mtc-yellow-border:rgba(245,210,110,.50);
           --mtc-slate:rgba(120,145,170,.25); --mtc-slate-border:rgba(160,180,210,.45);
           --mtc-deep:rgba(40,150,90,.35); --mtc-deep-border:rgba(90,220,140,.55);
+          --mtc-order:rgba(210,80,80,.24); --mtc-order-border:rgba(240,130,130,.50);
         }
       }
       .roche-plugin-memory-token-cleaner * { box-sizing:border-box; }
@@ -687,6 +789,7 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner .act-prompt { background:var(--mtc-yellow); border-color:var(--mtc-yellow-border); }
       .roche-plugin-memory-token-cleaner .act-review { background:var(--mtc-slate); border-color:var(--mtc-slate-border); }
       .roche-plugin-memory-token-cleaner .act-apply { background:var(--mtc-deep); border-color:var(--mtc-deep-border); }
+      .roche-plugin-memory-token-cleaner .act-order { background:var(--mtc-order); border-color:var(--mtc-order-border); }
       .roche-plugin-memory-token-cleaner .mtc-badges { display:flex; gap:5px; flex-wrap:wrap; }
       .roche-plugin-memory-token-cleaner .mtc-badge {
         display:inline-flex; align-items:center; border-radius:999px; padding:2px 7px; font-size:11px;
@@ -748,9 +851,10 @@ ${JSON.stringify(records, null, 2)}`;
           facts: [],
           core: null,
           proposals: new Map(),
-          tracker: { known: {}, cleanedAt: null },
+          tracker: { known: {}, hashes: {}, cleanedAt: null },
           customInstruction: "",
           reviewMode: "review",
+          workflow: "",
           showPrompt: false,
           showResults: false,
           busy: false
@@ -772,11 +876,11 @@ ${JSON.stringify(records, null, 2)}`;
 
         async function loadTracker() {
           if (!state.conversationId) {
-            state.tracker = { known: {}, cleanedAt: null };
+            state.tracker = { known: {}, hashes: {}, cleanedAt: null };
             return;
           }
           const saved = await roche.storage.get(trackerKey());
-          state.tracker = saved && typeof saved === "object" ? { known: saved.known || {}, cleanedAt: saved.cleanedAt || null } : { known: {}, cleanedAt: null };
+          state.tracker = saved && typeof saved === "object" ? { known: saved.known || {}, hashes: saved.hashes || {}, cleanedAt: saved.cleanedAt || null } : { known: {}, hashes: {}, cleanedAt: null };
         }
 
         async function saveTracker() {
@@ -786,24 +890,37 @@ ${JSON.stringify(records, null, 2)}`;
 
         async function markAllKnown() {
           const known = {};
+          const hashes = {};
           for (const r of currentRows()) {
             if (r.id) known[r.id] = r.hash;
+            if (r.hash) hashes[r.hash] = true;
           }
-          state.tracker = { known, cleanedAt: new Date().toISOString() };
+          state.tracker = { known, hashes, cleanedAt: new Date().toISOString() };
           await saveTracker();
         }
 
         function currentRows() {
           const known = state.tracker?.known || {};
+          const hashes = state.tracker?.hashes || {};
           return state.facts.map((item, index) => {
             const id = getMemoryId(item) || `idx_${index}`;
             const text = getFactText(item);
             const hash = hashText(text);
             const oldHash = known[id];
-            const isKnown = oldHash === hash;
+            const hashKnown = !!hashes[hash];
+            const isKnown = oldHash === hash || hashKnown;
             const isChanged = !!oldHash && oldHash !== hash;
-            const isNew = !oldHash;
-            return { id, item, text, hash, oldHash, isKnown, isChanged, isNew, index, analysis: localAnalyzeFact(text, state.settings), eventTime: extractEventTime(text) };
+            const isNew = !oldHash && !hashKnown;
+            const when = getFactWhen(item);
+            return {
+              id, item, text, hash, oldHash, hashKnown, isKnown, isChanged, isNew, index,
+              who: getFactWho(item),
+              when,
+              where: getFactWhere(item),
+              how: getFactHow(item),
+              analysis: localAnalyzeFact(text, state.settings),
+              eventTime: extractEventTime(text, item)
+            };
           });
         }
 
@@ -885,13 +1002,14 @@ ${JSON.stringify(records, null, 2)}`;
           }
         }
 
-        async function reviewRows(rows, mode = "review") {
+        async function reviewRows(rows, mode = "review", workflow = mode) {
           if (!rows.length) {
             roche.ui.toast("没有需要处理的记忆。");
             return;
           }
           state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
           state.reviewMode = mode;
+          state.workflow = workflow;
           state.proposals.clear();
           setBusy(true);
           try {
@@ -937,7 +1055,7 @@ ${JSON.stringify(records, null, 2)}`;
             });
             if (!ok) return;
           }
-          await reviewRows(rows, "review");
+          await reviewRows(rows, "review", "cleanNew");
         }
 
         async function quickCompressFlagged() {
@@ -984,26 +1102,16 @@ ${JSON.stringify(records, null, 2)}`;
           }
         }
 
-        async function updateMemory(id, text) {
-          await roche.memory.update(id, {
-            summaryText: text,
-            action: text,
-            text,
-            content: text,
-            source: "plugin_memory_token_cleaner_v27"
-          });
+        async function updateMemory(id, text, sourceItem = null, overrides = {}) {
+          await roche.memory.update(id, buildMemoryPayload(text, sourceItem, overrides));
         }
 
-        async function writeMemory(text) {
+        async function writeMemory(text, sourceItem = null, overrides = {}) {
           if (!roche.memory.write) throw new Error("当前 Roche API 未提供 memory.write。");
           return await roche.memory.write({
             conversationId: state.conversationId,
             type: "fact",
-            summaryText: text,
-            action: text,
-            text,
-            content: text,
-            source: "plugin_memory_token_cleaner_v27"
+            ...buildMemoryPayload(text, sourceItem, overrides)
           });
         }
 
@@ -1043,30 +1151,81 @@ ${JSON.stringify(records, null, 2)}`;
           Array.from(state.proposals.keys()).forEach(id => syncEditedProposal(id));
         }
 
-        async function applyOneProposal(p) {
-          if (!p || p.action === "KEEP") return "skip";
+        function proposalEventTime(p) {
+          if (!p) return Infinity;
+          if (p.type === "archive") {
+            const first = (p.sourceIds || []).map(id => currentRows().find(r => r.id === id)).find(Boolean);
+            return first ? first.eventTime : parseDateTimeValue(p.when || p.archiveText);
+          }
+          const row = currentRows().find(r => r.id === p.id);
+          const fromProposal = parseDateTimeValue(p.when || p.newText || "");
+          if (Number.isFinite(fromProposal)) return fromProposal;
+          return row ? row.eventTime : Infinity;
+        }
+
+        function sortProposalsForLocalReorder(items) {
+          return items.slice().sort((a, b) => {
+            const at = Number.isFinite(proposalEventTime(a)) ? proposalEventTime(a) : Infinity;
+            const bt = Number.isFinite(proposalEventTime(b)) ? proposalEventTime(b) : Infinity;
+            if (at !== bt) return at - bt;
+            const ai = currentRows().find(r => r.id === a.id)?.index ?? 0;
+            const bi = currentRows().find(r => r.id === b.id)?.index ?? 0;
+            return ai - bi;
+          });
+        }
+
+        function localReorderWarning(proposals) {
+          const ids = new Set((proposals || []).flatMap(p => p.sourceIds || [p.id]).filter(Boolean));
+          if (!ids.size) return "";
+          const rows = currentRows();
+          const touched = rows.filter(r => ids.has(r.id));
+          const untouched = rows.filter(r => !ids.has(r.id));
+          const minTouched = Math.min(...touched.map(r => r.eventTime).filter(Number.isFinite));
+          const maxUntouched = Math.max(...untouched.map(r => r.eventTime).filter(Number.isFinite));
+          if (Number.isFinite(minTouched) && Number.isFinite(maxUntouched) && minTouched < maxUntouched) {
+            return "检测到本次维护里有早于现有最新事实的时间；局部重排只能整理本批顺序，完成后建议再用“修复记忆顺序”。";
+          }
+          return "";
+        }
+
+        async function applyOneProposal(p, options = {}) {
+          if (!p) return "skip";
+          const touchKeep = !!options.touchKeep;
+          if (p.action === "KEEP" && !touchKeep) return "skip";
 
           if (p.type === "archive") {
+            const sourceRows = (p.sourceIds || []).map(id => currentRows().find(r => r.id === id)).filter(Boolean);
+            const firstRow = sourceRows[0];
             const text = finalMemoryText(p.archiveText, p.keywords, state.settings);
+
             if (p.action === "DELETE") {
               for (const id of p.sourceIds) await roche.memory.delete(id);
               return "delete";
             }
+
             if (p.action === "ARCHIVE_REPLACE" || p.action === "ARCHIVE_KEEP") {
               if (!text) return "skip";
-              try {
-                await writeMemory(text);
-                if (p.action === "ARCHIVE_REPLACE") {
-                  for (const id of p.sourceIds) await roche.memory.delete(id);
-                }
+
+              // 顺序保护：归档默认 update 第一条旧记忆，再删除其余来源，避免旧事变成最新事实。
+              if (p.action === "ARCHIVE_REPLACE" && firstRow) {
+                await updateMemory(firstRow.id, text, firstRow.item, {
+                  when: firstNonEmpty(firstRow.when, inferWhenFromText(text)),
+                  where: firstRow.where,
+                  who: p.who || firstRow.who,
+                  how: p.how || firstRow.how
+                });
+                for (const id of p.sourceIds.slice(1)) await roche.memory.delete(id);
                 return "archive";
-              } catch (err) {
-                const [first, ...rest] = p.sourceIds;
-                await updateMemory(first, text);
-                if (p.action === "ARCHIVE_REPLACE") {
-                  for (const id of rest) await roche.memory.delete(id);
-                }
-                return "archive-fallback";
+              }
+
+              if (p.action === "ARCHIVE_KEEP") {
+                await writeMemory(text, firstRow?.item || null, {
+                  when: firstNonEmpty(firstRow?.when, inferWhenFromText(text)),
+                  where: firstRow?.where,
+                  who: p.who || firstRow?.who,
+                  how: p.how || firstRow?.how
+                });
+                return "archive";
               }
             }
             return "skip";
@@ -1074,6 +1233,16 @@ ${JSON.stringify(records, null, 2)}`;
 
           const original = currentRows().find(r => r.id === p.id);
           if (!original) return "skip";
+
+          if (p.action === "KEEP" && touchKeep) {
+            await updateMemory(p.id, original.text, original.item, {
+              who: p.who || original.who,
+              when: p.when || original.when || inferWhenFromText(original.text),
+              where: p.where || original.where,
+              how: p.how || original.how
+            });
+            return "reorder";
+          }
 
           if (p.action === "DELETE") {
             await roche.memory.delete(p.id);
@@ -1083,46 +1252,88 @@ ${JSON.stringify(records, null, 2)}`;
           if (p.action === "COMPRESS") {
             const text = finalMemoryText(p.newText, p.keywords, state.settings);
             if (!text) return "skip";
-            await updateMemory(p.id, text);
+            await updateMemory(p.id, text, original.item, {
+              who: p.who || original.who,
+              when: p.when || original.when || inferWhenFromText(text),
+              where: p.where || original.where,
+              how: p.how || original.how
+            });
             return "compress";
           }
 
           if (p.action === "SPLIT") {
-            const items = (p.newItems || []).map(x => finalMemoryText(x.text || x, x.keywords || [], state.settings)).filter(Boolean);
-            if (items.length < 2) return "skip";
-            try {
-              for (const item of items) await writeMemory(item);
-              await roche.memory.delete(p.id);
-              return "split";
-            } catch (err) {
-              await updateMemory(p.id, items.join("\n"));
-              return "split-fallback";
+            const items = (p.newItems || []).map(x => ({
+              text: finalMemoryText(x.text || x, x.keywords || [], state.settings),
+              keywords: x.keywords || []
+            })).filter(x => x.text);
+
+            if (!items.length) return "skip";
+
+            if (items.length === 1) {
+              await updateMemory(p.id, items[0].text, original.item, {
+                who: p.who || original.who,
+                when: p.when || original.when || inferWhenFromText(items[0].text),
+                where: p.where || original.where,
+                how: p.how || original.how
+              });
+              return "compress";
             }
+
+            // 顺序保护：第一条 update 原记忆，后续才新建。完全不拆时用户可用“改为单条压缩”。
+            await updateMemory(p.id, items[0].text, original.item, {
+              who: p.who || original.who,
+              when: p.when || original.when || inferWhenFromText(items[0].text),
+              where: p.where || original.where,
+              how: p.how || original.how
+            });
+            for (const item of items.slice(1)) {
+              await writeMemory(item.text, original.item, {
+                who: p.who || original.who,
+                when: p.when || original.when || inferWhenFromText(item.text),
+                where: p.where || original.where,
+                how: p.how || original.how
+              });
+            }
+            return "split";
           }
           return "skip";
         }
 
         async function applyAllResults() {
           syncAllEdited();
-          const proposals = Array.from(state.proposals.values()).filter(p => p.action !== "KEEP");
+          const all = Array.from(state.proposals.values());
+          const isCleanNew = state.workflow === "cleanNew";
+          let proposals = isCleanNew ? all : all.filter(p => p.action !== "KEEP");
+
           if (!proposals.length) {
             roche.ui.toast("没有可应用的 AI 结果。");
             return;
           }
 
+          const warning = isCleanNew ? localReorderWarning(proposals) : "";
+          const actionCount = proposals.filter(p => p.action !== "KEEP").length;
+          const keepTouchCount = isCleanNew ? proposals.filter(p => p.action === "KEEP").length : 0;
+
           const ok = await roche.ui.confirm({
             title: "应用全部结果",
-            message: `将应用 ${proposals.length} 条结果，包括压缩、拆分、删除或归档。确定继续吗？`
+            message: isCleanNew
+              ? `将应用 ${actionCount} 条修改，并按本次维护的 when 对 ${proposals.length} 条新增/变动记忆做局部重排。${warning ? "\\n\\n" + warning : ""}`
+              : `将应用 ${proposals.length} 条结果，包括压缩、拆分、删除或归档。确定继续吗？`
           });
           if (!ok) return;
 
+          if (isCleanNew) {
+            proposals = sortProposalsForLocalReorder(proposals);
+          }
+
           setBusy(true);
           try {
-            const done = { compress:0, delete:0, split:0, archive:0, skip:0 };
+            const done = { compress:0, delete:0, split:0, archive:0, reorder:0, skip:0 };
             for (const p of proposals) {
-              const r = await applyOneProposal(p);
+              const r = await applyOneProposal(p, { touchKeep: isCleanNew });
               if (r === "compress") done.compress++;
               else if (r === "delete") done.delete++;
+              else if (r === "reorder") done.reorder++;
               else if (r.startsWith("split")) done.split++;
               else if (r.startsWith("archive")) done.archive++;
               else done.skip++;
@@ -1131,8 +1342,9 @@ ${JSON.stringify(records, null, 2)}`;
             await markAllKnown();
             state.proposals.clear();
             state.showResults = false;
-            roche.ui.toast(`完成：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}。`);
-            log(`已应用全部结果：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}，跳过 ${done.skip}。`);
+            state.workflow = "";
+            roche.ui.toast(`完成：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}。`);
+            log(`已应用全部结果：压缩 ${done.compress}，拆分 ${done.split}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}，跳过 ${done.skip}。${warning ? " " + warning : ""}`);
             render();
           } catch (err) {
             roche.ui.toast("应用失败：" + (err?.message || err));
@@ -1213,6 +1425,91 @@ ${JSON.stringify(records, null, 2)}`;
             const factMap = new Map(currentRows().map(r => [r.id, r]));
             state.proposals.set(id, normalizeProposal({ id, action:"COMPRESS", newText: simpleCompressText(row.text, state.settings) }, factMap, state.settings, "compressOnly"));
             roche.ui.toast("AI重写失败，已用本地压缩。");
+          } finally {
+            setBusy(false);
+          }
+        }
+
+        function removeSplitItem(id, index) {
+          syncEditedProposal(id);
+          const p = state.proposals.get(id);
+          if (!p || p.action !== "SPLIT") return;
+          const idx = Number(index);
+          p.newItems = (p.newItems || []).filter((_, i) => i !== idx);
+
+          if (p.newItems.length <= 0) {
+            p.action = "KEEP";
+            p._marked = "keep";
+          } else if (p.newItems.length === 1) {
+            p.action = "COMPRESS";
+            p.newText = p.newItems[0].text || "";
+            p.keywords = p.newItems[0].keywords || [];
+            p.newItems = [];
+          }
+
+          state.proposals.set(id, p);
+          render();
+        }
+
+        async function repairMemoryOrder() {
+          const rows = currentRows();
+          if (!rows.length) {
+            roche.ui.toast("没有可重排的事实记忆。");
+            return;
+          }
+
+          const sortable = rows.filter(r => Number.isFinite(r.eventTime)).length;
+          const unknown = rows.length - sortable;
+          const ok = await roche.ui.confirm({
+            title: "修复记忆顺序",
+            message: `将备份并删除重建 ${rows.length} 条事实记忆，按 when/正文日期从旧到新写回。可排序 ${sortable} 条，缺少时间 ${unknown} 条。继续吗？`
+          });
+          if (!ok) return;
+
+          const second = await roche.ui.confirm({
+            title: "再次确认",
+            message: "此操作会重建事实记忆顺序，用于修复最新事实注入被乱序影响的问题。确定执行吗？"
+          });
+          if (!second) return;
+
+          setBusy(true);
+          try {
+            const backup = {
+              createdAt: new Date().toISOString(),
+              conversationId: state.conversationId,
+              facts: rows.map(r => cloneFactForBackup(r))
+            };
+            await roche.storage.set(`memory-token-cleaner-reorder-backup:${state.conversationId}:${Date.now()}`, backup);
+            await roche.storage.set(`memory-token-cleaner-reorder-backup:latest:${state.conversationId}`, backup);
+
+            const sorted = rows.slice().sort((a, b) => {
+              const at = Number.isFinite(a.eventTime) ? a.eventTime : -Infinity;
+              const bt = Number.isFinite(b.eventTime) ? b.eventTime : -Infinity;
+              return (at - bt) || (a.index - b.index);
+            });
+
+            for (const r of rows) {
+              await roche.memory.delete(r.id);
+            }
+
+            for (const r of sorted) {
+              const payloadText = r.text;
+              await writeMemory(payloadText, r.item, {
+                who: r.who || getFactWho(r.item),
+                when: r.when || inferWhenFromText(r.text),
+                where: r.where || getFactWhere(r.item),
+                how: r.how || getFactHow(r.item)
+              });
+            }
+
+            await loadMemory({ silent: true });
+            await markAllKnown();
+            roche.ui.toast("记忆顺序已重建，并已更新清理新增索引。");
+            log(`已修复记忆顺序：重建 ${rows.length} 条，备份已保存。`);
+            render();
+          } catch (err) {
+            roche.ui.toast("修复顺序失败：" + (err?.message || err));
+            log("修复顺序失败：" + (err?.message || err));
           } finally {
             setBusy(false);
           }
@@ -1299,7 +1596,10 @@ ${JSON.stringify(records, null, 2)}`;
           const isKeep = p.action === "KEEP";
           const splitBlocks = p.action === "SPLIT" ? (p.newItems || []).map((item, i) => `
             <div class="mtc-split-box">
-              <div class="mtc-muted">新记忆 ${i + 1}</div>
+              <div class="mtc-row" style="justify-content:space-between">
+                <div class="mtc-muted">新记忆 ${i + 1}</div>
+                <button type="button" class="danger" data-action="remove-split-item" data-id="${escapeHtml(p.id)}" data-index="${i}">删除此条</button>
+              </div>
               <textarea class="mtc-edit-text" data-role="split" data-id="${escapeHtml(p.id)}" data-index="${i}">${escapeHtml(finalMemoryText(item.text, item.keywords, state.settings))}</textarea>
             </div>
           `).join("") : "";
@@ -1391,7 +1691,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2.7</div>
+              <div class="mtc-title">记忆低Token清理器 v3.2</div>
             </div>
 
             <div class="mtc-card">
@@ -1421,7 +1721,7 @@ ${JSON.stringify(records, null, 2)}`;
             <div class="mtc-card">
               <div class="mtc-action-grid">
                 <button type="button" class="mtc-action act-new" data-action="clean-new" ${disabled}>
-                  <b>清理新增</b><span>日常维护，处理上次清理后新增或变动的事实记忆。</span>
+                  <b>清理新增</b><span>日常维护，处理新增/变动事实，并按本次 when 自动局部重排。</span>
                 </button>
                 <button type="button" class="mtc-action act-compress" data-action="quick-compress" ${disabled}>
                   <b>压缩过长/流水账</b><span>只整理过长或流水账，偏保守，不主动删除。</span>
@@ -1431,6 +1731,9 @@ ${JSON.stringify(records, null, 2)}`;
                 </button>
                 <button type="button" class="mtc-action act-archive" data-action="archive-old" ${disabled}>
                   <b>旧记忆归档</b><span>记忆减退，把旧记忆合并成阶段叙事，属于特殊整理。</span>
+                </button>
+                <button type="button" class="mtc-action act-order" data-action="repair-order" ${disabled}>
+                  <b>修复记忆顺序</b><span>按 when/正文日期重建卡片顺序，避免旧记忆污染最新事实注入。</span>
                 </button>
                 <button type="button" class="mtc-action act-prompt" data-action="toggle-prompt" ${disabled}>
                   <b>新增提示词</b><span>给本次 AI 操作加临时要求，不写入记忆。</span>
@@ -1450,7 +1753,8 @@ ${JSON.stringify(records, null, 2)}`;
               </div>
 
               <div class="mtc-muted" style="margin-top:8px;line-height:1.55">
-                建议最新事实注入上限设为 3～5。
+                建议最新事实注入上限设为 3～5。<br>
+                清理新增会按本次维护的 when 自动局部重排；执行大清洗、压缩过长/流水账、旧记忆归档，或应用包含旧记忆拆分/归档/新建的结果后，建议使用“修复记忆顺序”。
               </div>
             </div>
 
@@ -1518,7 +1822,7 @@ ${JSON.stringify(records, null, 2)}`;
               state.facts = [];
               state.core = null;
               state.proposals.clear();
-              state.tracker = { known: {}, cleanedAt: null };
+              state.tracker = { known: {}, hashes: {}, cleanedAt: null };
               render();
             }
           });
@@ -1554,13 +1858,14 @@ ${JSON.stringify(records, null, 2)}`;
               state.facts = [];
               state.core = null;
               state.proposals.clear();
-              state.tracker = { known: {}, cleanedAt: null };
+              state.tracker = { known: {}, hashes: {}, cleanedAt: null };
               return render();
             }
             if (action === "clean-new") return cleanNew();
             if (action === "wash-all") return washAll();
             if (action === "quick-compress") return quickCompressFlagged();
             if (action === "archive-old") return archiveOldMemories();
+            if (action === "repair-order") return repairMemoryOrder();
             if (action === "toggle-prompt") {
               state.showPrompt = !state.showPrompt;
               return render();
@@ -1574,6 +1879,7 @@ ${JSON.stringify(records, null, 2)}`;
             if (action === "restore-defaults") return restoreDefaultSettings();
             if (action === "rerun") return rerunOneAi(id);
             if (action === "single-compress") return convertToSingleCompress(id);
+            if (action === "remove-split-item") return removeSplitItem(id, btn.dataset.index);
             if (action === "mark-keep") return markKeep(id);
             if (action === "mark-delete") return markDelete(id);
             if (action === "undo") return undoMark(id);
