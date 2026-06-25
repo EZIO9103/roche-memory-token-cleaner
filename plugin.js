@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "2.5.0";
+  const VERSION = "2.6.0";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -16,7 +16,6 @@
     writeKeywords: true,
     autoApplySafeCompress: false,
     showCore: false,
-    showVectors: false,
     executeAllAiSuggestions: false
   };
 
@@ -555,7 +554,7 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner .mtc-stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
       .roche-plugin-memory-token-cleaner .mtc-stat { background:var(--mtc-soft-bg); border-radius:12px; padding:9px; }
       .roche-plugin-memory-token-cleaner .mtc-stat b { display:block; font-size:18px; }
-      .roche-plugin-memory-token-cleaner .mtc-list { display:flex; flex-direction:column; gap:10px; }
+      .roche-plugin-memory-token-cleaner .mtc-list { display:none !important; }
       .roche-plugin-memory-token-cleaner .mtc-fact { background:var(--mtc-soft-bg); }
       .roche-plugin-memory-token-cleaner .mtc-badges { display:flex; gap:5px; flex-wrap:wrap; }
       .roche-plugin-memory-token-cleaner .mtc-badge {
@@ -1181,7 +1180,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button id="mtc-back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v2.5.4.3</div>
+              <div class="mtc-title">记忆低Token清理器 v2.6</div>
             </div>
 
             <div class="mtc-card">
@@ -1200,7 +1199,6 @@ ${JSON.stringify(records, null, 2)}`;
             <div class="mtc-card">
               <div class="mtc-stats">
                 <div class="mtc-stat"><b>${state.facts.length}</b><span>事实记忆</span></div>
-                <div class="mtc-stat"><b>${state.vectors.length}</b><span>向量记忆</span></div>
                 <div class="mtc-stat"><b>${s.priority}</b><span>优先清理</span></div>
                 <div class="mtc-stat"><b>${s.totalTokens}</b><span>事实估算token</span></div>
                 <div class="mtc-stat"><b>${s.safe}</b><span>AI建议</span></div>
@@ -1254,7 +1252,6 @@ ${JSON.stringify(records, null, 2)}`;
                   ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
                   ${renderSwitchRow("autoApplySafeCompress", "压缩建议可自动应用", state.settings.autoApplySafeCompress)}
                   ${renderSwitchRow("showCore", "显示Core Memory", state.settings.showCore)}
-                  ${renderSwitchRow("showVectors", "显示向量区", state.settings.showVectors)}
                 </div>
               </details>
 
@@ -1270,15 +1267,6 @@ ${JSON.stringify(records, null, 2)}`;
                 <div class="mtc-text" style="margin-top:8px">${escapeHtml(state.core?.summary || state.core?.text || JSON.stringify(state.core || {}, null, 2))}</div>
               </details>` : ""}
 
-            ${state.settings.showVectors ? `
-              <div class="mtc-card">
-                <div class="mtc-row">
-                  <div style="flex:1">向量记忆：${state.vectors.length} 条</div>
-                  <button id="mtc-delete-vectors" class="danger" ${disabled}>尝试删除全部向量</button>
-                </div>
-                <div class="mtc-muted" style="margin-top:8px">如果 Roche 不支持删除 vector，会显示失败数量。</div>
-              </div>` : ""}
-
 
             <div class="mtc-card">
               <div class="mtc-muted">
@@ -1290,6 +1278,8 @@ ${JSON.stringify(records, null, 2)}`;
             <div class="mtc-bottom-spacer"></div>
           `;
 
+          // Safety cleanup: raw fact/debug lists are not part of the v2.6 front-end flow.
+          root.querySelectorAll(".mtc-list").forEach(el => el.remove());
           bindEvents();
         }
 
@@ -1322,7 +1312,6 @@ ${JSON.stringify(records, null, 2)}`;
           });
           root.querySelector("#mtc-save-settings")?.addEventListener("click", saveSettingsFromUi);
           root.querySelector("#mtc-restore-defaults")?.addEventListener("click", restoreDefaultSettings);
-          root.querySelector("#mtc-delete-vectors")?.addEventListener("click", tryDeleteVectors);
           root.querySelectorAll(".mtc-switch-button").forEach(btn => btn.addEventListener("click", () => {
             const key = btn.dataset.settingKey;
             if (!key || !(key in state.settings)) return;
