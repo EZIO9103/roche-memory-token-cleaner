@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.4.6";
+  const VERSION = "3.4.7";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -1205,18 +1205,32 @@ ${JSON.stringify(records, null, 2)}`;
           ).trim();
         }
 
-        function hasConversationActivity(item) {
-          if (!item || typeof item === "string") return true;
-          if (item.__manual || item.__recent || item.__current) return true;
-          if (item.lastMessage || item.latestMessage || item.lastMessageText || item.preview || item.snippet) return true;
-          if (item.timestamp || item.updatedAt || item.lastMessageAt || item.lastActiveAt || item.time) return true;
-          if (typeof item.unread === "number" && item.unread > 0) return true;
-          if (typeof item.unreadCount === "number" && item.unreadCount > 0) return true;
-          if (typeof item.messageCount === "number" && item.messageCount > 0) return true;
-          if (Array.isArray(item.messages) && item.messages.length > 0) return true;
-          if (item.conversation?.lastMessage || item.group?.lastMessage || item.room?.lastMessage) return true;
-          if (item.conversation?.timestamp || item.group?.timestamp || item.room?.timestamp) return true;
+        function isDefinitelyEmptyConversation(item) {
+          if (!item || typeof item === "string") return false;
+          if (item.__manual || item.__recent || item.__current) return false;
+
+          const zeroNumbers = [
+            item.messageCount,
+            item.messagesCount,
+            item.chatCount,
+            item.roundCount,
+            item.totalMessages,
+            item.conversation?.messageCount,
+            item.group?.messageCount,
+            item.room?.messageCount
+          ].filter(v => typeof v === "number");
+
+          if (zeroNumbers.length && zeroNumbers.every(v => v <= 0)) return true;
+
+          const arrays = [item.messages, item.conversation?.messages, item.group?.messages, item.room?.messages]
+            .filter(Array.isArray);
+          if (arrays.length && arrays.every(arr => arr.length <= 0)) return true;
+
           return false;
+        }
+
+        function hasConversationActivity(item) {
+          return !isDefinitelyEmptyConversation(item);
         }
 
         function normalizeConversationItem(item, source, forceType = "") {
@@ -1233,7 +1247,7 @@ ${JSON.stringify(records, null, 2)}`;
             item?.__recent ||
             item?.__current;
 
-          if (!keepEvenIfEmpty && !hasConversationActivity(item)) return null;
+          if (!keepEvenIfEmpty && isDefinitelyEmptyConversation(item)) return null;
 
           const isGroup = forceType === "group" ||
             looksLikeGroupId(id) ||
@@ -1373,7 +1387,7 @@ ${JSON.stringify(records, null, 2)}`;
                     isGroup: false,
                     source: "character"
                   }))
-                  .filter(c => c.id && hasConversationActivity(c));
+                  .filter(c => c.id && !isDefinitelyEmptyConversation(c));
                 for (const c of items) {
                   addConversation(map, c, "character", "character");
                   singleCount++;
@@ -1416,7 +1430,7 @@ ${JSON.stringify(records, null, 2)}`;
             const foundGroups = list.filter(c => c.isGroup).length;
             const foundSingles = list.length - foundGroups;
             roche.ui.toast(`已刷新会话：群聊 ${foundGroups}，其他 ${foundSingles}。`);
-            log(`会话刷新完成：共 ${list.length} 个；群聊 ${foundGroups}，其他 ${foundSingles}，最近使用 ${recentCount}。已隐藏无聊天记录的角色/群聊。`);
+            log(`会话刷新完成：共 ${list.length} 个；群聊 ${foundGroups}，其他 ${foundSingles}，最近使用 ${recentCount}。已隐藏明确为空的会话。`);
           } catch (err) {
             roche.ui.toast("读取会话失败：" + (err?.message || err));
             log("读取会话失败：" + (err?.message || err));
@@ -2432,7 +2446,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.4.6</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4.7</div>
             </div>
 
             <div class="mtc-card">
@@ -2445,7 +2459,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1;min-width:220px">
                 <button type="button" data-action="use-manual-conv" ${disabled}>使用这个ID</button>
               </div>
-              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。列表默认隐藏没有聊天记录的角色/群聊；手动使用过的 groupId 会保存到最近使用。</div>
+              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。列表只隐藏明确为空的会话；手动使用过的 groupId 会保存到最近使用。</div>
             </div>
 
             <div class="mtc-card">
