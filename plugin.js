@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.4.5";
+  const VERSION = "3.4.6";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -1205,9 +1205,36 @@ ${JSON.stringify(records, null, 2)}`;
           ).trim();
         }
 
+        function hasConversationActivity(item) {
+          if (!item || typeof item === "string") return true;
+          if (item.__manual || item.__recent || item.__current) return true;
+          if (item.lastMessage || item.latestMessage || item.lastMessageText || item.preview || item.snippet) return true;
+          if (item.timestamp || item.updatedAt || item.lastMessageAt || item.lastActiveAt || item.time) return true;
+          if (typeof item.unread === "number" && item.unread > 0) return true;
+          if (typeof item.unreadCount === "number" && item.unreadCount > 0) return true;
+          if (typeof item.messageCount === "number" && item.messageCount > 0) return true;
+          if (Array.isArray(item.messages) && item.messages.length > 0) return true;
+          if (item.conversation?.lastMessage || item.group?.lastMessage || item.room?.lastMessage) return true;
+          if (item.conversation?.timestamp || item.group?.timestamp || item.room?.timestamp) return true;
+          return false;
+        }
+
         function normalizeConversationItem(item, source, forceType = "") {
           const id = conversationIdFromItem(item);
           if (!id) return null;
+
+          const sourceText = String(source || "").toLowerCase();
+          const keepEvenIfEmpty =
+            forceType === "recent" ||
+            sourceText.includes("recent") ||
+            sourceText.includes("manual") ||
+            sourceText.includes("current") ||
+            item?.__manual ||
+            item?.__recent ||
+            item?.__current;
+
+          if (!keepEvenIfEmpty && !hasConversationActivity(item)) return null;
+
           const isGroup = forceType === "group" ||
             looksLikeGroupId(id) ||
             !!item?.isGroup ||
@@ -1280,7 +1307,7 @@ ${JSON.stringify(records, null, 2)}`;
         async function loadRecentConversations() {
           try {
             const saved = await roche.storage.get(recentConversationsKey());
-            return Array.isArray(saved) ? saved.map(x => normalizeConversationItem(x, "recent", x?.type === "group" ? "group" : "")).filter(Boolean) : [];
+            return Array.isArray(saved) ? saved.map(x => normalizeConversationItem({ ...x, __recent: true }, "recent", x?.type === "group" ? "group" : "recent")).filter(Boolean) : [];
           } catch (_) {
             return [];
           }
@@ -1338,15 +1365,15 @@ ${JSON.stringify(records, null, 2)}`;
                 const items = (Array.isArray(chars) ? chars : arrayFromPossibleResult(chars))
                   .map(ch => ({
                     ...ch,
-                    id: ch.conversationId || ch.id || "",
-                    conversationId: ch.conversationId || ch.id || "",
+                    id: ch.conversationId || "",
+                    conversationId: ch.conversationId || "",
                     characterId: ch.id || "",
                     name: ch.handle || ch.name || ch.displayName || ch.id || "未命名角色",
                     type: "character",
                     isGroup: false,
                     source: "character"
                   }))
-                  .filter(c => c.id);
+                  .filter(c => c.id && hasConversationActivity(c));
                 for (const c of items) {
                   addConversation(map, c, "character", "character");
                   singleCount++;
@@ -1368,8 +1395,9 @@ ${JSON.stringify(records, null, 2)}`;
               addConversation(map, {
                 id: state.conversationId,
                 name: state.conversationId,
-                isGroup: looksLikeGroupId(state.conversationId)
-              }, "current", looksLikeGroupId(state.conversationId) ? "group" : "");
+                isGroup: looksLikeGroupId(state.conversationId),
+                __current: true
+              }, "current", looksLikeGroupId(state.conversationId) ? "group" : "recent");
             }
 
             const list = Array.from(map.values()).sort((a, b) => {
@@ -1388,7 +1416,7 @@ ${JSON.stringify(records, null, 2)}`;
             const foundGroups = list.filter(c => c.isGroup).length;
             const foundSingles = list.length - foundGroups;
             roche.ui.toast(`已刷新会话：群聊 ${foundGroups}，其他 ${foundSingles}。`);
-            log(`会话刷新完成：共 ${list.length} 个；群聊 ${foundGroups}，其他 ${foundSingles}，最近使用 ${recentCount}。`);
+            log(`会话刷新完成：共 ${list.length} 个；群聊 ${foundGroups}，其他 ${foundSingles}，最近使用 ${recentCount}。已隐藏无聊天记录的角色/群聊。`);
           } catch (err) {
             roche.ui.toast("读取会话失败：" + (err?.message || err));
             log("读取会话失败：" + (err?.message || err));
@@ -2404,7 +2432,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.4.5</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4.6</div>
             </div>
 
             <div class="mtc-card">
@@ -2417,7 +2445,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1;min-width:220px">
                 <button type="button" data-action="use-manual-conv" ${disabled}>使用这个ID</button>
               </div>
-              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。手动使用过的 groupId 会保存到最近使用，之后刷新会话列表也会显示。</div>
+              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。列表默认隐藏没有聊天记录的角色/群聊；手动使用过的 groupId 会保存到最近使用。</div>
             </div>
 
             <div class="mtc-card">
@@ -2577,7 +2605,8 @@ ${JSON.stringify(records, null, 2)}`;
                 name: manual,
                 isGroup: looksLikeGroupId(manual),
                 type: looksLikeGroupId(manual) ? "group" : "conversation",
-                source: "manual"
+                source: "manual",
+                __manual: true
               };
               await saveRecentConversation(conv);
               if (!state.conversations.some(c => c.id === manual || c.conversationId === manual)) {
