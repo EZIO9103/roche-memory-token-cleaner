@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.4.4";
+  const VERSION = "3.4.5";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -1138,37 +1138,257 @@ ${JSON.stringify(records, null, 2)}`;
           };
         }
 
+        const recentConversationsKey = () => "memory-token-cleaner-recent-conversations";
+
+        function looksLikeGroupId(id) {
+          return /^group[_-]/i.test(String(id || "")) || /^room[_-]/i.test(String(id || ""));
+        }
+
+        function getByPath(obj, path) {
+          return path.split(".").reduce((acc, key) => acc?.[key], obj);
+        }
+
+        function arrayFromPossibleResult(result) {
+          const out = [];
+          const walk = (value, depth = 0) => {
+            if (!value || depth > 2) return;
+            if (Array.isArray(value)) {
+              out.push(...value);
+              return;
+            }
+            if (typeof value !== "object") return;
+            for (const key of ["conversations", "conversationList", "groups", "groupList", "rooms", "roomList", "chats", "chatList", "threads", "items", "data", "list", "results", "records"]) {
+              if (Array.isArray(value[key])) out.push(...value[key]);
+              else if (value[key] && typeof value[key] === "object") walk(value[key], depth + 1);
+            }
+          };
+          walk(result);
+          return out;
+        }
+
+        function conversationIdFromItem(item) {
+          if (typeof item === "string") return item.trim();
+          return String(
+            item?.conversationId ||
+            item?.groupConversationId ||
+            item?.chatId ||
+            item?.groupId ||
+            item?.roomId ||
+            item?.threadId ||
+            item?.id ||
+            item?._id ||
+            item?.conversation?.id ||
+            item?.group?.conversationId ||
+            item?.group?.id ||
+            item?.room?.id ||
+            ""
+          ).trim();
+        }
+
+        function conversationNameFromItem(item, id) {
+          if (typeof item === "string") return item;
+          return String(
+            item?.name ||
+            item?.title ||
+            item?.groupName ||
+            item?.roomName ||
+            item?.chatName ||
+            item?.displayName ||
+            item?.handle ||
+            item?.nickname ||
+            item?.characterName ||
+            item?.group?.name ||
+            item?.group?.title ||
+            item?.room?.name ||
+            id ||
+            "未命名会话"
+          ).trim();
+        }
+
+        function normalizeConversationItem(item, source, forceType = "") {
+          const id = conversationIdFromItem(item);
+          if (!id) return null;
+          const isGroup = forceType === "group" ||
+            looksLikeGroupId(id) ||
+            !!item?.isGroup ||
+            !!item?.groupId ||
+            !!item?.roomId ||
+            String(item?.type || "").toLowerCase().includes("group") ||
+            String(source || "").toLowerCase().includes("group") ||
+            String(source || "").toLowerCase().includes("room");
+          return {
+            ...(typeof item === "object" && item ? item : {}),
+            id,
+            conversationId: id,
+            name: conversationNameFromItem(item, id),
+            type: isGroup ? "group" : (forceType || item?.type || "conversation"),
+            isGroup,
+            source
+          };
+        }
+
+        function addConversation(map, item, source, forceType = "") {
+          const c = normalizeConversationItem(item, source, forceType);
+          if (!c?.id) return false;
+          const old = map.get(c.id);
+          if (!old) {
+            map.set(c.id, c);
+            return true;
+          }
+          map.set(c.id, {
+            ...old,
+            ...c,
+            name: old.name && old.name !== old.id ? old.name : c.name,
+            isGroup: old.isGroup || c.isGroup,
+            type: old.isGroup || c.isGroup ? "group" : (old.type || c.type),
+            source: unique([old.source, c.source]).join("+")
+          });
+          return false;
+        }
+
+        function scanGroupIdsFromObject(value, map, source, depth = 0, seen = new WeakSet()) {
+          if (!value || depth > 5) return;
+          if (typeof value === "string") {
+            const matches = value.match(/group[_-][A-Za-z0-9_-]+/g) || [];
+            for (const id of matches) addConversation(map, { id, name: id, isGroup: true }, source, "group");
+            return;
+          }
+          if (typeof value !== "object") return;
+          if (seen.has(value)) return;
+          seen.add(value);
+          for (const [key, child] of Object.entries(value)) {
+            if (/group/i.test(key) && typeof child === "string") {
+              addConversation(map, { id: child, name: child, isGroup: true }, source, "group");
+            }
+            scanGroupIdsFromObject(child, map, source, depth + 1, seen);
+          }
+        }
+
+        async function tryReadConversationSource(path, forceType = "") {
+          try {
+            const fn = getByPath(roche, path);
+            if (typeof fn !== "function") return [];
+            const result = await fn.call(getByPath(roche, path.split(".").slice(0, -1).join(".")) || roche);
+            const arr = arrayFromPossibleResult(result);
+            return arr.map(item => normalizeConversationItem(item, path, forceType)).filter(Boolean);
+          } catch (err) {
+            log(`${path} 不可用：${err?.message || err}`);
+            return [];
+          }
+        }
+
+        async function loadRecentConversations() {
+          try {
+            const saved = await roche.storage.get(recentConversationsKey());
+            return Array.isArray(saved) ? saved.map(x => normalizeConversationItem(x, "recent", x?.type === "group" ? "group" : "")).filter(Boolean) : [];
+          } catch (_) {
+            return [];
+          }
+        }
+
+        async function saveRecentConversation(conv) {
+          const c = normalizeConversationItem(conv, "recent", conv?.type === "group" || conv?.isGroup ? "group" : "");
+          if (!c?.id) return;
+          const current = await loadRecentConversations();
+          const map = new Map();
+          addConversation(map, c, "recent", c.isGroup ? "group" : "");
+          for (const item of current) addConversation(map, item, "recent", item.isGroup ? "group" : "");
+          const next = Array.from(map.values()).slice(0, 30);
+          try { await roche.storage.set(recentConversationsKey(), next); } catch (_) {}
+        }
+
         async function loadConversations() {
           setBusy(true);
           try {
-            let list = [];
-            if (roche.conversation?.list) {
-              const convs = await roche.conversation.list();
-              list = (Array.isArray(convs) ? convs : []).map(c => ({
-                ...c,
-                id: c.id || c.conversationId || "",
-                name: c.name || c.title || c.handle || c.displayName || c.id || c.conversationId || "未命名会话",
-                source: "conversation"
-              }));
-              log(`通过 conversation.list 读取 ${list.length} 个会话。`);
+            const map = new Map();
+            let singleCount = 0;
+            let groupCount = 0;
+            let recentCount = 0;
+
+            const sources = [
+              ["conversation.list", ""],
+              ["conversations.list", ""],
+              ["chat.list", ""],
+              ["chats.list", ""],
+              ["thread.list", ""],
+              ["threads.list", ""],
+              ["group.list", "group"],
+              ["groups.list", "group"],
+              ["groupChat.list", "group"],
+              ["groupChats.list", "group"],
+              ["room.list", "group"],
+              ["rooms.list", "group"],
+              ["channel.list", "group"],
+              ["channels.list", "group"]
+            ];
+
+            for (const [path, forceType] of sources) {
+              const items = await tryReadConversationSource(path, forceType);
+              for (const c of items) {
+                addConversation(map, c, path, forceType);
+                if (c.isGroup) groupCount++;
+                else singleCount++;
+              }
+              if (items.length) log(`通过 ${path} 读取 ${items.length} 个会话。`);
             }
 
-            if ((!list || !list.length) && roche.character?.list) {
-              const chars = await roche.character.list();
-              list = (Array.isArray(chars) ? chars : [])
-                .map(ch => ({
-                  id: ch.conversationId || "",
-                  characterId: ch.id || "",
-                  name: ch.handle || ch.name || ch.displayName || ch.id || "未命名角色",
-                  type: "character",
-                  source: "character"
-                }))
-                .filter(c => c.id);
-              log(`改用 character.list 读取 ${list.length} 个角色会话。`);
+            if (roche.character?.list) {
+              try {
+                const chars = await roche.character.list();
+                const items = (Array.isArray(chars) ? chars : arrayFromPossibleResult(chars))
+                  .map(ch => ({
+                    ...ch,
+                    id: ch.conversationId || ch.id || "",
+                    conversationId: ch.conversationId || ch.id || "",
+                    characterId: ch.id || "",
+                    name: ch.handle || ch.name || ch.displayName || ch.id || "未命名角色",
+                    type: "character",
+                    isGroup: false,
+                    source: "character"
+                  }))
+                  .filter(c => c.id);
+                for (const c of items) {
+                  addConversation(map, c, "character", "character");
+                  singleCount++;
+                }
+                if (items.length) log(`通过 character.list 读取 ${items.length} 个角色会话。`);
+                scanGroupIdsFromObject(chars, map, "character扫描", 0);
+              } catch (err) {
+                log(`character.list 不可用：${err?.message || err}`);
+              }
             }
 
-            state.conversations = Array.isArray(list) ? list : [];
+            const recent = await loadRecentConversations();
+            for (const c of recent) {
+              addConversation(map, c, "recent", c.isGroup ? "group" : "");
+              recentCount++;
+            }
+
+            if (state.conversationId) {
+              addConversation(map, {
+                id: state.conversationId,
+                name: state.conversationId,
+                isGroup: looksLikeGroupId(state.conversationId)
+              }, "current", looksLikeGroupId(state.conversationId) ? "group" : "");
+            }
+
+            const list = Array.from(map.values()).sort((a, b) => {
+              const ag = a.isGroup ? 0 : 1;
+              const bg = b.isGroup ? 0 : 1;
+              if (ag !== bg) return ag - bg;
+              const ar = String(a.source || "").includes("recent") ? 0 : 1;
+              const br = String(b.source || "").includes("recent") ? 0 : 1;
+              if (ar !== br) return ar - br;
+              return String(a.name || a.id).localeCompare(String(b.name || b.id), "zh-Hans-CN");
+            });
+
+            state.conversations = list;
             if (!state.conversationId && state.conversations.length) state.conversationId = state.conversations[0].id;
+
+            const foundGroups = list.filter(c => c.isGroup).length;
+            const foundSingles = list.length - foundGroups;
+            roche.ui.toast(`已刷新会话：群聊 ${foundGroups}，其他 ${foundSingles}。`);
+            log(`会话刷新完成：共 ${list.length} 个；群聊 ${foundGroups}，其他 ${foundSingles}，最近使用 ${recentCount}。`);
           } catch (err) {
             roche.ui.toast("读取会话失败：" + (err?.message || err));
             log("读取会话失败：" + (err?.message || err));
@@ -2184,7 +2404,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.4.4</div>
+              <div class="mtc-title">记忆低Token清理器 v3.4.5</div>
             </div>
 
             <div class="mtc-card">
@@ -2197,7 +2417,7 @@ ${JSON.stringify(records, null, 2)}`;
                 <input id="mtc-manual-conversation-id" placeholder="兼容模式：手动粘贴 conversationId" value="${escapeHtml(state.conversationId || "")}" style="flex:1;min-width:220px">
                 <button type="button" data-action="use-manual-conv" ${disabled}>使用这个ID</button>
               </div>
-              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。</div>
+              <div class="mtc-muted" style="margin-top:8px">此插件仅影响事实记忆。手动使用过的 groupId 会保存到最近使用，之后刷新会话列表也会显示。</div>
             </div>
 
             <div class="mtc-card">
@@ -2351,11 +2571,24 @@ ${JSON.stringify(records, null, 2)}`;
             if (action === "use-manual-conv") {
               const manual = String(root.querySelector("#mtc-manual-conversation-id")?.value || "").trim();
               if (!manual) return roche.ui.toast("请先粘贴 conversationId。");
+              const conv = {
+                id: manual,
+                conversationId: manual,
+                name: manual,
+                isGroup: looksLikeGroupId(manual),
+                type: looksLikeGroupId(manual) ? "group" : "conversation",
+                source: "manual"
+              };
+              await saveRecentConversation(conv);
+              if (!state.conversations.some(c => c.id === manual || c.conversationId === manual)) {
+                state.conversations.unshift(conv);
+              }
               state.conversationId = manual;
               state.facts = [];
               state.core = null;
               state.proposals.clear();
               state.tracker = { known: {}, hashes: {}, cleanedAt: null };
+              roche.ui.toast("已保存到最近使用会话。");
               return render();
             }
             if (action === "clean-new") return cleanNew();
