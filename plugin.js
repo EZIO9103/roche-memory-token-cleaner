@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.5.0";
+  const VERSION = "3.5.2";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
