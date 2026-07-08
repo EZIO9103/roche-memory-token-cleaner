@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.5.2";
+  const VERSION = "3.5.4";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -127,13 +127,54 @@
     return String(text || "").replace(/\r/g, "").trim().slice(0, 1200);
   }
 
+  const GENERIC_TAGS = new Set([
+    "关系","情绪","未来","地点","聊天","事件","亲密","时间","记忆","互动","普通",
+    "relationship","emotion","future","place","location","chat","event","intimacy","memory","interaction"
+  ]);
+
+  function isMostlyCjk(text) {
+    return /[\u4e00-\u9fff]/.test(String(text || ""));
+  }
+
+  function normalizeKeyword(raw, settings = DEFAULT_SETTINGS) {
+    let k = String(raw || "")
+      .replace(/^#+/, "")
+      .replace(/[，,。；;:：]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!k) return "";
+
+    k = k.replace(/^(?:the|a|an)\s+/i, "").trim();
+
+    if (settings.tagEnglishMode) {
+      k = k.replace(/_/g, " ").replace(/\s+/g, " ").trim();
+    }
+
+    const lower = k.toLowerCase();
+    if (GENERIC_TAGS.has(k) || GENERIC_TAGS.has(lower)) return "";
+
+    if (/[。！？!?，,；;]/.test(k)) return "";
+    if (/(因为|所以|随后|然后|并且|导致|要求|承诺|表示|明确|发生|after|because|then|while|when|where|which|that|who|what|with|without)\s+/i.test(k) && k.split(/\s+/).length > 4) return "";
+
+    if (isMostlyCjk(k)) {
+      const cjk = (k.match(/[\u4e00-\u9fff]/g) || []).length;
+      if (cjk < 2) return "";
+      if (cjk > 6) return "";
+      return k.replace(/\s+/g, "");
+    }
+
+    const words = k.split(/\s+/).filter(Boolean);
+    if (words.length > 5) return "";
+    if (k.length > 42) return "";
+    return words.join(" ");
+  }
+
   function keywordTags(keywords, limit, settings = DEFAULT_SETTINGS) {
     return unique(keywords)
-      .slice(0, limit)
-      .map(k => String(k || "").replace(/^#/, "").trim())
-      .map(k => settings.tagEnglishMode ? k.replace(/\s+/g, "_") : k.replace(/\s+/g, ""))
-      .map(k => k.replace(/[，,。；;:：]+/g, "").trim())
+      .map(k => normalizeKeyword(k, settings))
       .filter(Boolean)
+      .slice(0, limit)
       .map(k => `#${k}`)
       .join(" ");
   }
@@ -145,20 +186,25 @@
       .map(x => x.slice(1).trim())
       .filter(Boolean);
 
-    const hints = settings.tagEnglishMode ? ENGLISH_IMPORTANT_HINTS : IMPORTANT_HINTS;
+    const hints = settings.tagEnglishMode ? ENGLISH_IMPORTANT_HINTS : [...IMPORTANT_HINTS, ...ENGLISH_IMPORTANT_HINTS];
     for (const k of hints) {
       if (settings.tagEnglishMode) {
+        if (t.toLowerCase().includes(k.toLowerCase())) hits.push(k);
+      } else if (/[A-Za-z]/.test(k)) {
         if (t.toLowerCase().includes(k.toLowerCase())) hits.push(k);
       } else if (t.includes(k)) {
         hits.push(k);
       }
     }
 
-    return unique([...hashTags, ...hits]).slice(0, Math.max(0, limit));
+    return unique([...hashTags, ...hits])
+      .map(k => normalizeKeyword(k, settings))
+      .filter(Boolean)
+      .slice(0, Math.max(0, limit));
   }
 
   function finalMemoryText(text, keywords, settings) {
-    const body = String(text || "").trim();
+    const body = cleanWhatBody(String(text || "").trim(), {});
     if (!body) return "";
     if (!settings.writeKeywords) return body;
     if (/#\S+/.test(body)) return body;
@@ -444,14 +490,76 @@
     return parseDateTimeValue(inferWhenFromText(text));
   }
 
+  function timeToNaturalPeriod(hh) {
+    const h = Number(hh);
+    if (!Number.isFinite(h)) return "";
+    if (h >= 5 && h < 11) return "上午";
+    if (h >= 11 && h < 14) return "中午";
+    if (h >= 14 && h < 18) return "下午";
+    if (h >= 18 && h < 23) return "晚上";
+    return "深夜";
+  }
+
+  function cleanWhatBody(text, fields = {}) {
+    let s = String(text || "").trim();
+    if (!s) return "";
+
+    const who = String(fields.who || "").trim();
+
+    s = s.replace(/^\s*\[[^\]]*(?:主体|人物|who|时间|when|地点|where|来源|source)[^\]]*\]\s*/i, "").trim();
+
+    for (let i = 0; i < 4; i++) {
+      s = s
+        .replace(/^\s*(?:主体|人物|who)\s*[:=：]\s*[^，,。；;\n|]+\s*[，,。；;\n|]?\s*/i, "")
+        .replace(/^\s*(?:时间|when)\s*[:=：]\s*20\d{2}[^，,。；;\n|]*\s*[，,。；;\n|]?\s*/i, "")
+        .replace(/^\s*(?:地点|where)\s*[:=：]\s*[^，,。；;\n|]+\s*[，,。；;\n|]?\s*/i, "")
+        .replace(/^\s*(?:方式|状态|how)\s*[:=：]\s*[^，,。；;\n|]+\s*[，,。；;\n|]?\s*/i, "")
+        .replace(/^\s*(?:来源|source)\s*[:=：]\s*[^，,。；;\n|]+\s*[，,。；;\n|]?\s*/i, "")
+        .trim();
+    }
+
+    const whoVariants = [];
+    if (who) {
+      whoVariants.push(who);
+      whoVariants.push(who.replace(/,/g, "、"));
+      whoVariants.push(who.replace(/、/g, ","));
+    }
+    for (const w of unique(whoVariants)) {
+      const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*");
+      const re = new RegExp(`^\\s*${escaped}\\s*[:：,，、-]+\\s*`, "i");
+      for (let i = 0; i < 3; i++) s = s.replace(re, "").trim();
+    }
+
+    for (let i = 0; i < 3; i++) {
+      s = s.replace(/^\s*20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?)?(?:\s+\d{1,2}[:：]\d{2}(?:\s*UTC)?)?\s*(?:->\s*20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?)?(?:\s+\d{1,2}[:：]\d{2}(?:\s*UTC)?)?)?\s*[,，:：；;、-]*\s*/i, "").trim();
+    }
+
+    for (const w of unique(whoVariants)) {
+      const escaped = w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s*");
+      const re = new RegExp(`^\\s*${escaped}\\s*[:：,，、-]+\\s*`, "i");
+      s = s.replace(re, "").trim();
+    }
+
+    s = s.replace(/^\s*(?:20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?\s+)?(\d{1,2})[:：]\d{2}(?:\s*UTC)?\s*[,，:：；;、-]*\s*/i, (_, hh) => {
+      const period = timeToNaturalPeriod(hh);
+      return period ? `${period}，` : "";
+    });
+
+    s = s.replace(/^[,，:：；;、\s-]+/, "").trim();
+    s = s.replace(/^线上摘要\s*[:：]\s*[-—–]?\s*/i, "").trim();
+
+    return s;
+  }
+
   function buildMemoryPayload(text, sourceItem = null, overrides = {}, settings = DEFAULT_SETTINGS) {
-    const body = String(text || "").trim();
+    const rawBody = String(text || "").trim();
     const sourceText = sourceItem ? getFactText(sourceItem) : "";
     const keepUtc = !!settings.utcWhenMode;
     const who = firstNonEmpty(overrides.who, sourceItem && getFactWho(sourceItem), "线上摘要");
-    const when = sanitizeWhen(firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(body, keepUtc), inferWhenFromText(sourceText, keepUtc)), keepUtc);
+    const when = sanitizeWhen(firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(rawBody, keepUtc), inferWhenFromText(sourceText, keepUtc)), keepUtc);
     const where = firstNonEmpty(overrides.where, sourceItem && getFactWhere(sourceItem));
     const how = firstNonEmpty(overrides.how, sourceItem && getFactHow(sourceItem));
+    const body = cleanWhatBody(rawBody, { who, when, where, how });
     return {
       who,
       when,
@@ -561,17 +669,30 @@
 
   function keywordRulesText(settings) {
     const lang = settings.tagEnglishMode
-      ? `关键词语言：英文。keywords 必须输出英文短语；人名、代号和专有名词如 Ranni、Sebastian、Ghost、Soap、Gaz、Price 保持原样，不强行翻译。`
-      : `关键词语言：简体中文。keywords 用简体中文短语；人名、代号和专有名词可以保持原样。`;
+      ? `关键词语言：英文优先。keywords 用自然英文短语；人名、代号和专有名词如 Ranni、Sebastian、Ghost、Soap、Gaz、Price 保持原样。英文 keyword 允许空格，禁止下划线。`
+      : `关键词语言：自动/混合。keywords 可以用中文、英文或中英混合，以原记忆语言和召回效果为准；不要强行锁定中文。`;
 
     return `${lang}
-1. 每条新记忆的关键词只允许来自该条内容，不要复制给所有拆分条目。
-2. 关键词优先写事件锚点、关系锚点、承诺锚点、边界锚点、具体物品锚点。
-3. 地点不是必填；线上聊天不要默认加地点。只有原文明确地点，或事件强依赖地点/物品所在地时，才生成地点关键词。
-4. 禁止用人物当前所在地、角色时区、默认城市自动生成地点关键词。
-5. 禁止只写香港、伦敦、格鲁吉亚这类粗地点；若确实需要地点，应写成具体场景，例如 Ranni公寓猫砂、格鲁吉亚药房秤、阳台窗锁 / Ranni apartment cat litter、Georgia pharmacy scale、balcony window lock。
-6. 避免抽象概念标签，例如 关系、未来、情绪、亲密 / relationship、future、emotion、intimacy，除非该词就是原事件核心词。
-7. 关键词数量 2-4 个即可，宁少勿乱。`;
+1. keywords 是检索钩子，不是事件总结；禁止把完整事件压成一句 keyword。
+2. 每个 keyword 只表达一个可搜索概念：称呼、物品、承诺、边界、冲突、地点场景。
+3. 中文 keyword 以 2-6 个汉字为主，最多 6 个汉字。
+4. 英文 keyword 以 1-4 个词为主，最多 5 个词。
+5. 禁止整句 keyword；不要写“谁做了什么导致什么”。
+6. 禁止滥用抽象词：关系、情绪、未来、地点、聊天、事件、亲密。
+7. 过短或过泛的词必须组合成具体钩子：不要只写 Si，要写 Si称呼 / Si nickname。
+8. 地点不是必填。只有原文明确地点或事件强依赖地点时才写地点。
+9. 禁止用人物当前所在地、角色时区、默认城市自动生成地点关键词。
+10. 确实需要地点时，也要短：逸东酒店、药房秤、阳台窗锁 / pharmacy scale、balcony lock。`;
+  }
+
+  function whatBodyRulesText() {
+    return `WHAT/newText 正文规则：
+1. WHAT 只写事件正文，不要重复 who、when、where、how。
+2. 禁止以人物列表、日期、时间范围、主体=、时间=、来源= 这类结构字段开头。
+3. 单日事件通常不要在 WHAT 里重复日期，因为日期已写入 when。
+4. 跨天或多阶段事件可以在 WHAT 里写日期，用来表达推进顺序；但不要写 12:35、03:24、22:58 这类具体钟点。
+5. 如果原文具体时刻只是聊天发生时间，可自然化为中午、下午、晚上、深夜等；如果时刻本身是约定、航班、见面、离开节点，才允许保留具体时刻。
+6. 旧记忆未标注时区时，不把具体钟点写进 WHAT，也不伪装成 UTC。`;
   }
 
   function buildReviewerPrompt(records, settings, customInstruction = "", mode = "review") {
@@ -591,6 +712,8 @@ Fact Memory 规则：
 3. 不要把事件压成抽象标签。必须保留事件骨架。
 4. 不要添加原文没有的信息。禁止补天气、氛围、心理动机、小说化收束句。
 5. 不要为了好看而润色。只保留事件、动作、关系后果。
+
+${whatBodyRulesText()}
 
 压缩规则：
 1. 优先删除分钟级流水账，只保留日期锚、阶段锚、行程锚。
@@ -667,6 +790,8 @@ ${JSON.stringify(records, null, 2)}`;
     const extra = cleanCustomInstruction(customInstruction);
     return `用户不想拆分或删除这条事实记忆。请把它改为单条压缩记忆，抹去次要细节，只保留最重要的长期事件轮廓。不要 SPLIT，不要 DELETE。不要添加原文没有的信息。
 
+${whatBodyRulesText()}
+
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
 结构字段规则：
@@ -707,6 +832,8 @@ ${JSON.stringify(record, null, 2)}`;
 3. 普通事实目标 70-120 中文字；重大关系节点最多 160 中文字。
 4. 不要添加原文没有的信息。
 5. 输出仍然是一条事实记忆，不要写成总结标题或人设归纳。
+
+${whatBodyRulesText()}
 
 when 规则：
 ${whenRulesText(settings, false)}
@@ -763,6 +890,8 @@ ${JSON.stringify(record, null, 2)}`;
 7. 如果旧事实只是重复小互动、普通调情、表情包、无后果照片，可以 DELETE。
 8. 如果内容仍然太重要、不能减退，返回 KEEP。
 9. 默认优先使用 ARCHIVE_REPLACE：生成归档记忆，并删除被归档的旧事实。
+
+${whatBodyRulesText()}
 
 归档粒度：
 - 阶段归档：允许把同一段时间的多条线合成 1-3 条阶段叙事。
@@ -830,6 +959,60 @@ ${JSON.stringify(records, null, 2)}`;
     return fallbackReviewRecords(records, settings, mode);
   }
 
+  function buildManualMergePrompt(records, sourceIds, settings = DEFAULT_SETTINGS, customInstruction = "") {
+    const extra = cleanCustomInstruction(customInstruction);
+    return `你正在合并用户手动选中的多条事实记忆。用户已经判断这些内容属于同一条已闭环事件线；你的任务是生成一条可写回的 MERGE_REPLACE 草稿。
+
+硬性要求：
+1. 只输出一条 MERGE_REPLACE。
+2. 不要原文拼接，不要逐条摘要，不要列清单。
+3. 不要拆分，不要删除，不要返回 KEEP。
+4. 不要额外合并未选中的记忆。
+5. 必须删除重复人物、重复日期、重复解释，只保留开始、推进、结果与关系后果。
+6. newText 必须是初步优化后的完整事实记忆，用户可以继续编辑，但不能让用户从原文拼贴开始手动改。
+7. 合并后的 WHAT 不要以日期、日期范围或时间戳开头；when 已保存完整时间范围，WHAT 只写事件推进。
+8. 跨天事件可以用“次日、后来、随后、最终”等相对推进词，不要机械列日期。
+9. 只有日期本身是被讨论、被忘记、被承诺、被确认的事件内容时，才允许写入 WHAT。
+
+${whatBodyRulesText()}
+
+结构字段规则：
+1. sourceIds 必须原样返回：${JSON.stringify(sourceIds)}。
+2. who/where/how 可以是自然语言短语。
+3. where 不是必填；线上聊天不要默认推断地点。只有原文明确地点或事件强依赖地点时才写。
+${whenRulesText(settings, false)}
+
+关键词规则：
+${keywordRulesText(settings)}
+
+${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
+
+只返回严格 JSON 对象，不要解释，不要 Markdown。格式：
+{
+  "items": [
+    {
+      "action": "MERGE_REPLACE",
+      "sourceIds": ${JSON.stringify(sourceIds)},
+      "newText": "合并优化后的单条事实记忆",
+      "keywords": ["短关键词1","短关键词2"],
+      "reason": "手动合并",
+      "who": "可选，人物",
+      "when": "可选，时间段",
+      "where": "可选，地点",
+      "how": "可选，方式/状态"
+    }
+  ]
+}
+
+用户选中的当前草稿：
+${JSON.stringify(records, null, 2)}`;
+  }
+
+  async function askAiForManualMerge(roche, records, sourceIds, settings = DEFAULT_SETTINGS, customInstruction = "") {
+    const parsed = await askAi(roche, buildManualMergePrompt(records, sourceIds, settings, customInstruction));
+    return parsed?.[0] || null;
+  }
+
   async function askAiForSingleCompress(roche, row, settings = DEFAULT_SETTINGS, customInstruction = "") {
     const parsed = await askAi(roche, buildSingleCompressPrompt({ id: row.id, text: row.text }, settings, customInstruction));
     return parsed?.[0] || null;
@@ -862,7 +1045,7 @@ ${JSON.stringify(records, null, 2)}`;
     }
 
     const original = factMap.get(id)?.text || (sourceIds.map(sid => factMap.get(sid)?.text).filter(Boolean).join("\n"));
-    const keywords = unique(p?.keywords || []).slice(0, settings.keywordLimit);
+    let keywords = unique(p?.keywords || []).slice(0, settings.keywordLimit);
     let newText = String(
       p?.newText ||
       p?.mergeText ||
@@ -930,14 +1113,22 @@ ${JSON.stringify(records, null, 2)}`;
     if (!["safe","confirm"].includes(risk)) risk = needsManual ? "confirm" : "safe";
     if (needsManual) risk = "confirm";
 
+    const outWho = String(p?.who || "").trim();
+    const outWhen = sanitizeWhen(p?.when || "", settings.utcWhenMode);
+    const outWhere = String(p?.where || "").trim();
+    const outHow = String(p?.how || "").trim();
+    newText = cleanWhatBody(newText, { who: outWho, when: outWhen, where: outWhere, how: outHow });
+    newItems = (newItems || []).map(item => ({ ...item, text: cleanWhatBody(item.text, {}) }));
+    keywords = unique(keywords.map(k => normalizeKeyword(k, settings)).filter(Boolean)).slice(0, settings.keywordLimit);
+
     return {
       id, sourceIds, action, newText, newItems, keywords,
       reason: manualReasons[0] || reason,
       risk, needsManual,
-      who: String(p?.who || "").trim(),
-      when: sanitizeWhen(p?.when || "", settings.utcWhenMode),
-      where: String(p?.where || "").trim(),
-      how: String(p?.how || "").trim(),
+      who: outWho,
+      when: outWhen,
+      where: outWhere,
+      how: outHow,
       type: action === "MERGE_REPLACE" ? "merge" : "fact"
     };
   }
@@ -950,7 +1141,7 @@ ${JSON.stringify(records, null, 2)}`;
     if (!sourceIds.length) action = "KEEP";
 
     let archiveText = String(p?.archiveText || p?.newText || p?.what || p?.summaryText || p?.content || p?.text || "").trim();
-    const keywords = unique(p?.keywords || extractKeywordsFromText(archiveText, settings.keywordLimit, settings)).slice(0, settings.keywordLimit);
+    let keywords = unique(p?.keywords || extractKeywordsFromText(archiveText, settings.keywordLimit, settings)).slice(0, settings.keywordLimit);
     let needsManual = false;
     let reason = String(p?.reason || "").trim().slice(0, 40);
 
@@ -959,6 +1150,13 @@ ${JSON.stringify(records, null, 2)}`;
       needsManual = true;
       reason = "归档为空";
     }
+
+    const outWho = String(p?.who || "").trim();
+    const outWhen = sanitizeWhen(p?.when || "", settings.utcWhenMode);
+    const outWhere = String(p?.where || "").trim();
+    const outHow = String(p?.how || "").trim();
+    archiveText = cleanWhatBody(archiveText, { who: outWho, when: outWhen, where: outWhere, how: outHow });
+    keywords = unique(keywords.map(k => normalizeKeyword(k, settings)).filter(Boolean)).slice(0, settings.keywordLimit);
 
     return {
       id: makeProposalId("archive"),
@@ -969,10 +1167,10 @@ ${JSON.stringify(records, null, 2)}`;
       reason,
       risk: needsManual ? "confirm" : "safe",
       needsManual,
-      who: String(p?.who || "").trim(),
-      when: sanitizeWhen(p?.when || "", settings.utcWhenMode),
-      where: String(p?.where || "").trim(),
-      how: String(p?.how || "").trim(),
+      who: outWho,
+      when: outWhen,
+      where: outWhere,
+      how: outHow,
       type: "archive"
     };
   }
@@ -1134,6 +1332,7 @@ ${JSON.stringify(records, null, 2)}`;
           showPrompt: false,
           showResults: false,
           manualIds: [],
+          mergeSelection: new Set(),
           busy: false
         };
 
@@ -1310,6 +1509,7 @@ ${JSON.stringify(records, null, 2)}`;
             state.facts = Array.isArray(memory?.facts) ? memory.facts : [];
             if (clearProposals) {
               state.proposals.clear();
+              state.mergeSelection?.clear?.();
               state.showResults = false;
             }
             log(`已重新读取事实记忆 ${state.facts.length} 条。`);
@@ -1348,6 +1548,7 @@ ${JSON.stringify(records, null, 2)}`;
           state.reviewMode = mode;
           state.workflow = workflow;
           state.proposals.clear();
+              state.mergeSelection?.clear?.();
           setBusy(true);
           try {
             let count = 0;
@@ -1454,6 +1655,7 @@ ${JSON.stringify(records, null, 2)}`;
 
           state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
           state.proposals.clear();
+              state.mergeSelection?.clear?.();
           setBusy(true);
           try {
             const records = rows.map(r => ({ id: r.id, text: r.text }));
@@ -1561,6 +1763,167 @@ ${JSON.stringify(records, null, 2)}`;
           state.proposals.set(id, p);
         }
 
+        function proposalSourceIds(p) {
+          if (!p) return [];
+          const ids = p.sourceIds && p.sourceIds.length ? p.sourceIds : [p.id];
+          const factMap = new Map(currentRows().map(r => [r.id, r]));
+          return unique(ids).filter(id => factMap.has(id));
+        }
+
+        function proposalDraftText(p, factMap) {
+          if (!p) return "";
+          if (p.type === "archive") return String(p.archiveText || "").trim();
+          if (p.type === "merge") return String(p.newText || "").trim();
+          if (p.action === "COMPRESS") return String(p.newText || "").trim();
+          if (p.action === "SPLIT") return (p.newItems || []).map((x, i) => `${i + 1}. ${String(x?.text || x || "").trim()}`).filter(Boolean).join("\n");
+          const ids = proposalSourceIds(p);
+          return ids.map(id => factMap.get(id)?.text).filter(Boolean).join("\n") || String(factMap.get(p.id)?.text || "").trim();
+        }
+
+        function whenDateOnly(part) {
+          const s = sanitizeWhen(part, state.settings.utcWhenMode);
+          const full = s.match(/20\d{2}-\d{2}-\d{2}/);
+          if (full) return full[0];
+          const month = s.match(/20\d{2}-\d{2}/);
+          if (month) return month[0];
+          const year = s.match(/\b20\d{2}\b/);
+          return year ? year[0] : "";
+        }
+
+        function whenBoundsFromRow(row) {
+          if (!row) return null;
+          const keepUtc = !!state.settings.utcWhenMode;
+          const raw = sanitizeWhen(row.when || inferWhenFromText(row.text, keepUtc), keepUtc);
+          if (!raw) return null;
+          const parts = raw.split(/\s*->\s*/).map(x => x.trim()).filter(Boolean);
+          const start = parts[0] || raw;
+          const end = parts.length > 1 ? parts[parts.length - 1] : start;
+          const startVal = parseSingleDateTimeValue(start, false);
+          const endVal = parseSingleDateTimeValue(end, true);
+          if (!Number.isFinite(startVal) && !Number.isFinite(endVal)) return null;
+          return {
+            start,
+            end,
+            startVal: Number.isFinite(startVal) ? startVal : endVal,
+            endVal: Number.isFinite(endVal) ? endVal : startVal,
+            utc: hasUtcMarker(start) && hasUtcMarker(end)
+          };
+        }
+
+        function mergeWhenFromRows(rows) {
+          const bounds = (rows || []).map(whenBoundsFromRow).filter(Boolean);
+          if (!bounds.length) return "";
+          const first = bounds.slice().sort((a, b) => a.startVal - b.startVal)[0];
+          const last = bounds.slice().sort((a, b) => b.endVal - a.endVal)[0];
+          if (!first || !last) return "";
+
+          const allUtc = state.settings.utcWhenMode && bounds.every(b => b.utc);
+          let start = first.start;
+          let end = last.end;
+
+          if (!allUtc) {
+            start = whenDateOnly(start);
+            end = whenDateOnly(end);
+          }
+
+          if (!start && !end) return "";
+          if (!end || start === end) return start || end;
+
+          // 同一天但来源带不同钟点时，非全 UTC 情况降级到日期，避免把具体钟点塞进跨卡合并 when。
+          return `${start} -> ${end}`;
+        }
+
+        async function mergeSelectedProposals() {
+          syncAllEdited();
+          state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
+
+          const selectedIds = Array.from(state.mergeSelection || []).filter(id => state.proposals.has(id));
+          if (selectedIds.length < 2) {
+            roche.ui.toast("请至少选择 2 条结果再合并。");
+            return;
+          }
+
+          const factMap = new Map(currentRows().map(r => [r.id, r]));
+          const selected = selectedIds.map(id => state.proposals.get(id)).filter(Boolean);
+          const sourceIds = unique(selected.flatMap(p => proposalSourceIds(p))).filter(id => factMap.has(id));
+          if (sourceIds.length < 2) {
+            roche.ui.toast("合并来源不足，至少需要 2 条原始事实。");
+            return;
+          }
+
+          const sourceRows = sourceIds.map(id => factMap.get(id)).filter(Boolean);
+          const fallbackWhen = mergeWhenFromRows(sourceRows);
+
+          const records = selected.map(p => {
+            const ids = proposalSourceIds(p);
+            const rows = ids.map(id => factMap.get(id)).filter(Boolean);
+            return {
+              proposalId: p.id,
+              action: p.action,
+              type: p.type || "fact",
+              sourceIds: ids,
+              text: proposalDraftText(p, factMap),
+              originalText: rows.map(r => r.text).filter(Boolean).join("\n"),
+              who: p.who || rows.map(r => r.who).filter(Boolean).join(", "),
+              when: p.when || mergeWhenFromRows(rows),
+              where: p.where || rows.map(r => r.where).filter(Boolean).join(", "),
+              how: p.how || rows.map(r => r.how).filter(Boolean).join(", ")
+            };
+          }).filter(r => r.text || r.originalText);
+
+          if (!records.length) {
+            roche.ui.toast("没有可合并的文本。");
+            return;
+          }
+
+          setBusy(true);
+          try {
+            const raw = await askAiForManualMerge(roche, records, sourceIds, state.settings, state.customInstruction);
+            if (!raw) {
+              roche.ui.toast("AI没有返回可用合并结果，当前结果未改变。");
+              return;
+            }
+
+            const proposal = {
+              ...raw,
+              action: "MERGE_REPLACE",
+              sourceIds,
+              when: raw.when || fallbackWhen,
+              reason: raw.reason || "手动合并"
+            };
+            const normalized = normalizeProposal(proposal, factMap, state.settings, "review");
+            normalized.when = sanitizeWhen(normalized.when || fallbackWhen, state.settings.utcWhenMode) || fallbackWhen;
+            normalized.sourceIds = sourceIds;
+            normalized.type = "merge";
+            normalized.action = "MERGE_REPLACE";
+            normalized.reason = normalized.reason || "手动合并";
+            normalized.newText = cleanWhatBody(normalized.newText, {
+              who: normalized.who,
+              when: normalized.when,
+              where: normalized.where,
+              how: normalized.how
+            });
+
+            if (!normalized.newText) {
+              roche.ui.toast("AI合并为空，当前结果未改变。");
+              return;
+            }
+
+            for (const id of selectedIds) state.proposals.delete(id);
+            for (const id of selectedIds) state.mergeSelection.delete(id);
+            state.proposals.set(normalized.id, normalized);
+            state.showResults = true;
+            state.workflow = state.workflow || "manualMerge";
+            roche.ui.toast(`已合并 ${selectedIds.length} 张结果卡，可继续编辑后再应用。`);
+            render();
+          } catch (err) {
+            roche.ui.toast("合并已选失败：" + (err?.message || err));
+            log("合并已选失败：" + (err?.message || err));
+          } finally {
+            setBusy(false);
+          }
+        }
+
         function proposalEventTime(p) {
           if (!p) return Infinity;
           if (p.type === "archive" || p.type === "merge") {
@@ -1600,16 +1963,7 @@ ${JSON.stringify(records, null, 2)}`;
           return "";
         }
 
-        function mergeWhenFromRows(rows) {
-          const sorted = (rows || []).filter(r => Number.isFinite(r.eventTime)).sort((a, b) => a.eventTime - b.eventTime);
-          if (!sorted.length) return "";
-          const first = sanitizeWhen(sorted[0].when || inferWhenFromText(sorted[0].text));
-          const last = sanitizeWhen(sorted[sorted.length - 1].when || inferWhenFromText(sorted[sorted.length - 1].text));
-          if (first && last && first !== last) return `${first} -> ${last}`;
-          return first || last || "";
-        }
-
-        async function applyOneProposal(p, options = {}) {
+                async function applyOneProposal(p, options = {}) {
           if (!p) return "skip";
           const touchKeep = !!options.touchKeep;
           if (p.action === "KEEP" && !touchKeep) return "skip";
@@ -1794,6 +2148,7 @@ ${JSON.stringify(records, null, 2)}`;
             await refreshAfterApply();
             await markAllKnown();
             state.proposals.clear();
+              state.mergeSelection?.clear?.();
             state.showResults = false;
             state.workflow = "";
             roche.ui.toast(`完成：压缩 ${done.compress}，拆分 ${done.split}，合并 ${done.merge}，删除 ${done.delete}，归档 ${done.archive}，局部重排 ${done.reorder}。`);
@@ -2147,10 +2502,22 @@ ${JSON.stringify(records, null, 2)}`;
           return `<span class="mtc-badge ${cls}">${escapeHtml(act)}</span>`;
         }
 
+        function renderMergeSelector(p) {
+          const id = escapeHtml(p.id);
+          const checked = state.mergeSelection?.has?.(p.id) ? "checked" : "";
+          return `
+            <label class="mtc-merge-select" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+              <input type="checkbox" data-role="merge-select" data-id="${id}" ${checked}>
+              <span class="mtc-muted">合并选择</span>
+            </label>
+          `;
+        }
+
         function renderArchiveProposal(p, factMap) {
           const sourceText = (p.sourceIds || []).map(id => factMap.get(id)?.text).filter(Boolean);
           return `
             <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+              ${renderMergeSelector(p)}
               <div class="mtc-badges">
                 ${actionBadge(p)}
                 <span class="mtc-badge">来源 ${p.sourceIds.length} 条</span>
@@ -2173,6 +2540,7 @@ ${JSON.stringify(records, null, 2)}`;
           const sourceText = (p.sourceIds || []).map(id => factMap.get(id)?.text).filter(Boolean);
           return `
             <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+              ${renderMergeSelector(p)}
               <div class="mtc-badges">
                 ${actionBadge(p)}
                 <span class="mtc-badge">合并 ${p.sourceIds.length} 条</span>
@@ -2210,6 +2578,7 @@ ${JSON.stringify(records, null, 2)}`;
 
           return `
             <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+              ${renderMergeSelector(p)}
               <div class="mtc-badges">
                 ${actionBadge(p)}
                 ${isKeep ? `<span class="mtc-badge">KEEP</span>` : ""}
@@ -2271,11 +2640,15 @@ ${JSON.stringify(records, null, 2)}`;
           return `
             <div class="mtc-card">
               <div style="font-weight:700;margin-bottom:8px">查看/编辑结果</div>
-              <div class="mtc-muted">这里不会立刻写回记忆。你可以编辑、重改、标记保留或删除，最后点底部“应用全部结果”。</div>
+              <div class="mtc-muted">这里不会立刻写回记忆。你可以编辑、重改、合并已选、标记保留或删除，最后点底部“应用全部结果”。</div>
               ${group("需处理", needs)}
               ${group("AI已修改", changed)}
               ${group("建议保留", keep)}
               <div class="mtc-row" style="margin-top:12px">
+                <button type="button" class="mtc-action act-compress" data-action="merge-selected">
+                  <b>合并已选${state.mergeSelection?.size ? `（${state.mergeSelection.size}）` : ""}</b>
+                  <span>把勾选的结果卡合成一张 MERGE_REPLACE 草稿，不会写回记忆。</span>
+                </button>
                 <button type="button" class="mtc-action act-apply" data-action="apply-all">
                   <b>应用全部结果</b>
                   <span>把当前 AI 结果和你手动编辑过的内容写回事实记忆。</span>
@@ -2302,7 +2675,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.5.2</div>
+              <div class="mtc-title">记忆低Token清理器 v3.5.4</div>
             </div>
 
             <div class="mtc-card">
@@ -2330,7 +2703,7 @@ ${JSON.stringify(records, null, 2)}`;
               <div class="mtc-stats">
                 <div class="mtc-stat"><b>${state.facts.length}</b><span>事实记忆</span></div>
                 <div class="mtc-stat"><b>${s.newCount}</b><span>新增/变动</span></div>
-                <div class="mtc-stat"><b>${s.priority}</b><span>优先清理</span></div>
+                <div class="mtc-stat"><b>${s.priority}</b><span>压缩候选</span></div>
                 <div class="mtc-stat"><b>${s.totalTokens}</b><span>估算token</span></div>
                 <div class="mtc-stat"><b>${s.aiResults}</b><span>AI结果</span></div>
                 <div class="mtc-stat"><b>${s.needsManual}</b><span>需处理</span></div>
@@ -2392,11 +2765,11 @@ ${JSON.stringify(records, null, 2)}`;
                   ${renderSwitchRow("executeAllAiSuggestions", "全部执行AI建议", state.settings.executeAllAiSuggestions)}
                   ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
                   ${renderSwitchRow("utcWhenMode", "UTC时间模式", state.settings.utcWhenMode)}
-                  ${renderSwitchRow("tagEnglishMode", "Tag英文模式", state.settings.tagEnglishMode)}
+                  ${renderSwitchRow("tagEnglishMode", "Tag英文优先", state.settings.tagEnglishMode)}
                   ${renderSwitchRow("showCore", "显示Core Memory", state.settings.showCore)}
                   <div class="mtc-field-note" style="margin-top:8px;line-height:1.55">
                     UTC时间模式：只在来源/when 明确带 UTC 时保留 UTC 格式，不会把旧未标注时间强行改成 UTC。<br>
-                    Tag英文模式：AI 生成 keywords 时优先用英文；地点 tag 只在原文明确地点或事件强依赖地点时生成。
+                    Tag英文优先：开启后 keywords 优先用英文自然短语且不使用下划线；关闭时允许中文、英文或中英混合。地点 tag 只在原文明确地点或事件强依赖地点时生成。
                   </div>
                 </div>
               </details>
@@ -2437,11 +2810,20 @@ ${JSON.stringify(records, null, 2)}`;
           });
 
           root.addEventListener("change", e => {
+            if (e.target?.matches?.('input[data-role="merge-select"]')) {
+              const id = e.target.dataset.id;
+              if (!state.mergeSelection) state.mergeSelection = new Set();
+              if (e.target.checked) state.mergeSelection.add(id);
+              else state.mergeSelection.delete(id);
+              render();
+              return;
+            }
             if (e.target?.id === "mtc-conversation") {
               state.conversationId = e.target.value;
               state.facts = [];
               state.core = null;
               state.proposals.clear();
+              state.mergeSelection?.clear?.();
               state.tracker = { known: {}, hashes: {}, cleanedAt: null };
               render();
             }
@@ -2469,7 +2851,7 @@ ${JSON.stringify(records, null, 2)}`;
             const id = btn.dataset.id;
 
             const preservesDraftActions = new Set([
-              "toggle-prompt", "apply-all", "rerun", "rerun-merge",
+              "toggle-prompt", "apply-all", "merge-selected", "rerun", "rerun-merge",
               "use-manual-conv", "use-saved-manual-id", "remove-saved-manual-id", "clear-saved-manual-ids",
               "single-compress", "tighten", "tighten-split-item", "remove-split-item",
               "mark-keep", "mark-delete", "undo"
@@ -2489,6 +2871,7 @@ ${JSON.stringify(records, null, 2)}`;
               state.facts = [];
               state.core = null;
               state.proposals.clear();
+              state.mergeSelection?.clear?.();
               state.tracker = { known: {}, hashes: {}, cleanedAt: null };
               roche.ui.toast("已使用并保存这个 ID。");
               return render();
@@ -2501,6 +2884,7 @@ ${JSON.stringify(records, null, 2)}`;
               state.facts = [];
               state.core = null;
               state.proposals.clear();
+              state.mergeSelection?.clear?.();
               state.tracker = { known: {}, hashes: {}, cleanedAt: null };
               roche.ui.toast("已切换到保存的 ID。");
               return render();
@@ -2532,6 +2916,7 @@ ${JSON.stringify(records, null, 2)}`;
               return render();
             }
             if (action === "apply-all") return applyAllResults();
+            if (action === "merge-selected") return mergeSelectedProposals();
             if (action === "save-settings") return saveSettingsFromUi();
             if (action === "restore-defaults") return restoreDefaultSettings();
             if (action === "rerun") return rerunOneAi(id);
