@@ -15,6 +15,8 @@
     longTermLimit: 300,
     archiveCount: 10,
     writeKeywords: true,
+    utcWhenMode: false,
+    tagEnglishMode: false,
     executeAllAiSuggestions: false,
     showCore: false
   };
@@ -31,6 +33,12 @@
     "表情","贴纸","sticker","emoji","哈哈","笑死","调侃","玩笑","破防","普通自拍",
     "吃饭","早餐","午餐","晚餐","睡觉","洗澡","刷牙","喝水","普通道歉","尴尬",
     "脸红","害羞","已读","黄段子","露骨"
+  ];
+
+  const ENGLISH_IMPORTANT_HINTS = [
+    "promise","boundary","conflict","apology","reconciliation","trust","nickname","mask",
+    "photo","selfie","apartment","hotel","pharmacy scale","cat litter","return promise",
+    "weight dispute","blackout","silent treatment","blocked","love","family","farewell"
   ];
 
   function escapeHtml(text) {
@@ -119,22 +127,33 @@
     return String(text || "").replace(/\r/g, "").trim().slice(0, 1200);
   }
 
-  function keywordTags(keywords, limit) {
+  function keywordTags(keywords, limit, settings = DEFAULT_SETTINGS) {
     return unique(keywords)
       .slice(0, limit)
-      .map(k => String(k).replace(/^#/, "").replace(/\s+/g, ""))
+      .map(k => String(k || "").replace(/^#/, "").trim())
+      .map(k => settings.tagEnglishMode ? k.replace(/\s+/g, "_") : k.replace(/\s+/g, ""))
+      .map(k => k.replace(/[，,。；;:：]+/g, "").trim())
       .filter(Boolean)
       .map(k => `#${k}`)
       .join(" ");
   }
 
-  function extractKeywordsFromText(text, limit = 4) {
+  function extractKeywordsFromText(text, limit = 4, settings = DEFAULT_SETTINGS) {
     const t = String(text || "");
     const hits = [];
-    const hashTags = (t.match(/#[\u4e00-\u9fffA-Za-z0-9_-]+/g) || []).map(x => x.slice(1));
-    for (const k of IMPORTANT_HINTS) {
-      if (t.includes(k)) hits.push(k);
+    const hashTags = (t.match(/#[\u4e00-\u9fffA-Za-z0-9_\-\s]+/g) || [])
+      .map(x => x.slice(1).trim())
+      .filter(Boolean);
+
+    const hints = settings.tagEnglishMode ? ENGLISH_IMPORTANT_HINTS : IMPORTANT_HINTS;
+    for (const k of hints) {
+      if (settings.tagEnglishMode) {
+        if (t.toLowerCase().includes(k.toLowerCase())) hits.push(k);
+      } else if (t.includes(k)) {
+        hits.push(k);
+      }
     }
+
     return unique([...hashTags, ...hits]).slice(0, Math.max(0, limit));
   }
 
@@ -143,7 +162,7 @@
     if (!body) return "";
     if (!settings.writeKeywords) return body;
     if (/#\S+/.test(body)) return body;
-    const tags = keywordTags(keywords, settings.keywordLimit);
+    const tags = keywordTags(keywords, settings.keywordLimit, settings);
     return tags ? `${body} ${tags}` : body;
   }
 
@@ -302,13 +321,19 @@
     return String(n).padStart(2, "0");
   }
 
-  function normalizeNumericDatePart(text) {
+  function hasUtcMarker(text) {
+    return /\bUTC\b/i.test(String(text || ""));
+  }
+
+  function normalizeNumericDatePart(text, keepUtc = false) {
     const t = String(text || "").trim();
-    const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?/);
+    const hasUtc = keepUtc && hasUtcMarker(t);
+    const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?(?:\s*UTC)?/i);
     if (full) {
       const y = full[1], m = pad2(full[2]), d = pad2(full[3]);
       const time = full[4] ? ` ${pad2(full[4])}:${pad2(full[5] || 0)}` : "";
-      return `${y}-${m}-${d}${time}`;
+      const utc = hasUtc && time ? " UTC" : "";
+      return `${y}-${m}-${d}${time}${utc}`;
     }
     const month = t.match(/(20\d{2})[-/年.](\d{1,2})(?:月)?/);
     if (month) return `${month[1]}-${pad2(month[2])}`;
@@ -323,12 +348,13 @@
 
   function parseSingleDateTimeValue(text, preferEnd = false) {
     const t = String(text || "");
-    const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?/);
+    const isUtc = hasUtcMarker(t);
+    const full = t.match(/(20\d{2})[-/年.](\d{1,2})[-/月.](\d{1,2})(?:日)?(?:\s*(\d{1,2})[:：](\d{2}))?(?:\s*UTC)?/i);
     if (full) {
       const y = Number(full[1]), m = Number(full[2]), d = Number(full[3]);
       const hh = full[4] ? Number(full[4]) : (preferEnd ? 23 : 0);
       const mm = full[5] ? Number(full[5]) : (preferEnd ? 59 : 0);
-      const time = new Date(y, m - 1, d, hh, mm).getTime();
+      const time = isUtc ? Date.UTC(y, m - 1, d, hh, mm) : new Date(y, m - 1, d, hh, mm).getTime();
       if (Number.isFinite(time)) return time;
     }
     const month = t.match(/(20\d{2})[-/年.](\d{1,2})(?:月)?/);
@@ -347,46 +373,66 @@
   }
 
   function parseDateTimeValue(text) {
-    const t = sanitizeWhen(text);
+    const t = sanitizeWhen(text, true);
     if (!t) return Infinity;
     const parts = t.split(/\s*->\s*/).map(x => x.trim()).filter(Boolean);
     const target = parts.length > 1 ? parts[parts.length - 1] : parts[0];
     return parseSingleDateTimeValue(target, true);
   }
 
-  function sanitizeWhen(text) {
+  function sanitizeWhen(text, keepUtc = false) {
     const raw = String(text || "").trim();
     if (!raw) return "";
-    const fuzzy = /(上午|下午|早晨|清晨|中午|晚上|夜里|凌晨|傍晚|上旬|中旬|下旬|月初|月中|月末|那天|那段时间|后来|同一阶段|离港前后|早期相处|香港最后一天|离开前后|早期|最初|近期|最近|之后|以前|以前后|前后|期间)/;
-    const range = raw.match(/(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)?)\s*(?:->|至|到|—|–|~|～)\s*(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)?)/);
+    const fuzzy = /(上午|下午|早晨|清晨|中午|晚上|夜里|凌晨|傍晚|上旬|中旬|下旬|月初|月中|月末|那天|那段时间|后来|同一阶段|离港前后|早期相处|香港最后一天|离开前后|早期|最初|近期|最近|之后|以前|以前后|前后|期间|旧记忆原文时间|未标注时区)/;
+    const datePart = String.raw`20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?(?:\s*UTC)?)?`;
+    const rangeRe = new RegExp(`(${datePart})\\s*(?:->|至|到|—|–|~|～)\\s*(${datePart})`, "i");
+    const range = raw.match(rangeRe);
     if (range) {
-      const a = normalizeNumericDatePart(range[1]);
-      const b = normalizeNumericDatePart(range[2]);
+      const a = normalizeNumericDatePart(range[1], keepUtc);
+      const b = normalizeNumericDatePart(range[2], keepUtc);
       return a && b ? `${a} -> ${b}` : "";
     }
-    const allFull = raw.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?/g);
+
+    if (keepUtc && hasUtcMarker(raw)) {
+      const utcFull = raw.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?\s*UTC/ig);
+      if (utcFull && utcFull.length >= 2) {
+        const a = normalizeNumericDatePart(utcFull[0], true);
+        const b = normalizeNumericDatePart(utcFull[utcFull.length - 1], true);
+        return a && b && a !== b ? `${a} -> ${b}` : (a || "");
+      }
+      if (utcFull && utcFull.length === 1) return normalizeNumericDatePart(utcFull[0], true);
+    }
+
+    const allFull = raw.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?(?:\s*UTC)?/ig);
     if (allFull && allFull.length >= 2) {
-      const a = normalizeNumericDatePart(allFull[0]);
-      const b = normalizeNumericDatePart(allFull[allFull.length - 1]);
+      const a = normalizeNumericDatePart(allFull[0], keepUtc);
+      const b = normalizeNumericDatePart(allFull[allFull.length - 1], keepUtc);
       return a && b && a !== b ? `${a} -> ${b}` : (a || "");
     }
-    if (allFull && allFull.length === 1) return normalizeNumericDatePart(allFull[0]);
+    if (allFull && allFull.length === 1) return normalizeNumericDatePart(allFull[0], keepUtc);
     const month = raw.match(/20\d{2}[-/年.]\d{1,2}(?:月)?/);
-    if (month && !fuzzy.test(raw)) return normalizeNumericDatePart(month[0]);
+    if (month && !fuzzy.test(raw)) return normalizeNumericDatePart(month[0], keepUtc);
     const year = raw.match(/\b20\d{2}\b/);
     if (year && !fuzzy.test(raw)) return year[0];
     return "";
   }
 
-  function inferWhenFromText(text) {
+  function inferWhenFromText(text, keepUtc = false) {
     const t = String(text || "");
-    const range = t.match(/(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)\s*(?:->|至|到|—|–|~|～)\s*(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?)/);
-    if (range) return sanitizeWhen(`${range[1]} -> ${range[2]}`);
-    const allFull = t.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?/g);
-    if (allFull && allFull.length >= 2) return sanitizeWhen(`${allFull[0]} -> ${allFull[allFull.length - 1]}`);
-    if (allFull && allFull.length === 1) return sanitizeWhen(allFull[0]);
+
+    if (keepUtc && hasUtcMarker(t)) {
+      const utcFull = t.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?\s*UTC/ig);
+      if (utcFull && utcFull.length >= 2) return sanitizeWhen(`${utcFull[0]} -> ${utcFull[utcFull.length - 1]}`, true);
+      if (utcFull && utcFull.length === 1) return sanitizeWhen(utcFull[0], true);
+    }
+
+    const range = t.match(/(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?(?:\s*UTC)?)\s*(?:->|至|到|—|–|~|～)\s*(20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?(?:\s*UTC)?)/i);
+    if (range) return sanitizeWhen(`${range[1]} -> ${range[2]}`, keepUtc);
+    const allFull = t.match(/20\d{2}[-/年.]\d{1,2}[-/月.]\d{1,2}(?:日)?(?:\s*\d{1,2}[:：]\d{2})?(?:\s*UTC)?/ig);
+    if (allFull && allFull.length >= 2) return sanitizeWhen(`${allFull[0]} -> ${allFull[allFull.length - 1]}`, keepUtc);
+    if (allFull && allFull.length === 1) return sanitizeWhen(allFull[0], keepUtc);
     const month = t.match(/20\d{2}[-/年.]\d{1,2}(?:月)?/);
-    if (month) return sanitizeWhen(month[0]);
+    if (month) return sanitizeWhen(month[0], keepUtc);
     const year = t.match(/\b20\d{2}\b/);
     return year ? year[0] : "";
   }
@@ -398,11 +444,12 @@
     return parseDateTimeValue(inferWhenFromText(text));
   }
 
-  function buildMemoryPayload(text, sourceItem = null, overrides = {}) {
+  function buildMemoryPayload(text, sourceItem = null, overrides = {}, settings = DEFAULT_SETTINGS) {
     const body = String(text || "").trim();
     const sourceText = sourceItem ? getFactText(sourceItem) : "";
+    const keepUtc = !!settings.utcWhenMode;
     const who = firstNonEmpty(overrides.who, sourceItem && getFactWho(sourceItem), "线上摘要");
-    const when = sanitizeWhen(firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(body), inferWhenFromText(sourceText)));
+    const when = sanitizeWhen(firstNonEmpty(overrides.when, sourceItem && getFactWhen(sourceItem), inferWhenFromText(body, keepUtc), inferWhenFromText(sourceText, keepUtc)), keepUtc);
     const where = firstNonEmpty(overrides.where, sourceItem && getFactWhere(sourceItem));
     const how = firstNonEmpty(overrides.how, sourceItem && getFactHow(sourceItem));
     return {
@@ -445,7 +492,7 @@
     if (!Array.isArray(newItems)) return [];
     return newItems.map(item => {
       if (typeof item === "string") {
-        return { text: item.trim(), keywords: extractKeywordsFromText(item).slice(0, 4) };
+        return { text: item.trim(), keywords: extractKeywordsFromText(item, 4).slice(0, 4) };
       }
       return {
         text: String(item?.text || item?.content || item?.newText || "").trim(),
@@ -471,7 +518,7 @@
           action: newText ? "COMPRESS" : "KEEP",
           newText,
           newItems: [],
-          keywords: extractKeywordsFromText(text + " " + newText, settings.keywordLimit),
+          keywords: extractKeywordsFromText(text + " " + newText, settings.keywordLimit, settings),
           risk: "safe",
           reason: "本地保底压缩"
         };
@@ -482,11 +529,49 @@
         action: "KEEP",
         newText: "",
         newItems: [],
-        keywords: extractKeywordsFromText(text, settings.keywordLimit),
+        keywords: extractKeywordsFromText(text, settings.keywordLimit, settings),
         risk: "safe",
         reason: "解析失败保留"
       };
     });
+  }
+
+  function whenRulesText(settings, archive = false) {
+    const common = archive
+      ? `1. when 是机器排序字段，只能输出数字日期或数字日期范围。
+2. when 允许格式：2026-06、2026-06-01 -> 2026-06-30、2026。
+3. when 绝对不能出现：上午、下午、早晨、中午、晚上、上旬、中旬、下旬、月初、月中、月末、那段时间、后来、离港前后、早期相处、香港最后一天。
+4. 模糊阶段词只能写进正文，不能写进 when。
+5. 如果无法确定数字日期，when 留空。`
+      : `1. when 是机器排序字段，只能输出数字日期或数字日期范围。
+2. when 允许格式：2026-06-20、2026-06-20 22:14、2026-06-20 -> 2026-06-23、2026-06、2026。
+3. when 绝对不能出现：上午、下午、早晨、中午、晚上、上旬、中旬、下旬、月初、月中、月末、那段时间、后来、离港前后、早期相处、香港最后一天。
+4. 模糊阶段词只能写进正文，不能写进 when。
+5. 如果无法确定数字日期，when 留空。`;
+
+    if (!settings.utcWhenMode) return common;
+
+    return `${common}
+6. UTC时间模式已开启，但不要把所有 when 强制改成 UTC。
+7. 只有来源记忆、输入原文或原 when 明确带 UTC 时，when 才输出 UTC 格式，例如 2026-07-08 03:24 UTC 或 2026-07-06 22:58 UTC -> 2026-07-08 00:08 UTC。
+8. 如果同时出现本地时间与 UTC对照，when 只取 UTC 对照；本地时间最多写进正文。
+9. 如果来源写着“旧记忆原文时间、未标注时区、禁止当作 UTC 精算”，不得补 UTC，不得换算。
+10. 如果来源只有数字时间但没有 UTC，不得擅自补 UTC。`;
+  }
+
+  function keywordRulesText(settings) {
+    const lang = settings.tagEnglishMode
+      ? `关键词语言：英文。keywords 必须输出英文短语；人名、代号和专有名词如 Ranni、Sebastian、Ghost、Soap、Gaz、Price 保持原样，不强行翻译。`
+      : `关键词语言：简体中文。keywords 用简体中文短语；人名、代号和专有名词可以保持原样。`;
+
+    return `${lang}
+1. 每条新记忆的关键词只允许来自该条内容，不要复制给所有拆分条目。
+2. 关键词优先写事件锚点、关系锚点、承诺锚点、边界锚点、具体物品锚点。
+3. 地点不是必填；线上聊天不要默认加地点。只有原文明确地点，或事件强依赖地点/物品所在地时，才生成地点关键词。
+4. 禁止用人物当前所在地、角色时区、默认城市自动生成地点关键词。
+5. 禁止只写香港、伦敦、格鲁吉亚这类粗地点；若确实需要地点，应写成具体场景，例如 Ranni公寓猫砂、格鲁吉亚药房秤、阳台窗锁 / Ranni apartment cat litter、Georgia pharmacy scale、balcony window lock。
+6. 避免抽象概念标签，例如 关系、未来、情绪、亲密 / relationship、future、emotion、intimacy，除非该词就是原事件核心词。
+7. 关键词数量 2-4 个即可，宁少勿乱。`;
   }
 
   function buildReviewerPrompt(records, settings, customInstruction = "", mode = "review") {
@@ -531,12 +616,7 @@ MERGE 合并规则：
 7. MERGE_REPLACE 的 when 写事件线起点到闭环点，例如 2026-06-20 -> 2026-06-23；排序会按结束时间处理。
 
 关键词规则：
-1. 每条新记忆的关键词只允许来自该条内容。
-2. 禁止把同一组关键词复制给所有拆分条目。
-3. 禁止使用与本条无关的关键词。
-4. 关键词必须是具体搜索钩子，例如 #拉黑 #认错 #love #石头 #面具 #香港 #波本 #dirtytalk。
-5. 避免抽象概念标签，例如 #关系 #未来 #情绪 #亲密，除非该词就是原事件核心词。
-6. 关键词数量 2-4 个即可，宁少勿乱。
+${keywordRulesText(settings)}
 
 删除规则：
 1. 普通重复调情、表情包、无新后果的照片、临时害羞、普通玩笑、重复解释，可以 DELETE。
@@ -554,11 +634,8 @@ DELETE：无长期后果、重复、过时、低价值，应遗忘。
 
 结构字段规则：
 1. who/where/how 可以是自然语言短语。
-2. when 是机器排序字段，只能输出数字日期或数字日期范围。
-3. when 允许格式：2026-06-20、2026-06-20 22:14、2026-06-20 -> 2026-06-23、2026-06、2026。
-4. when 绝对不能出现：上午、下午、早晨、中午、晚上、上旬、中旬、下旬、月初、月中、月末、那段时间、后来、离港前后、早期相处、香港最后一天。
-5. 模糊阶段词只能写进 what/newText 正文，不能写进 when。
-6. 如果无法确定数字日期，when 留空。
+2. where 不是必填；线上聊天不要默认推断地点。只有原文明确地点或事件强依赖地点时才写。
+${whenRulesText(settings, false)}
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
@@ -586,16 +663,18 @@ ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 ${JSON.stringify(records, null, 2)}`;
   }
 
-  function buildSingleCompressPrompt(record, customInstruction = "") {
+  function buildSingleCompressPrompt(record, settings = DEFAULT_SETTINGS, customInstruction = "") {
     const extra = cleanCustomInstruction(customInstruction);
     return `用户不想拆分或删除这条事实记忆。请把它改为单条压缩记忆，抹去次要细节，只保留最重要的长期事件轮廓。不要 SPLIT，不要 DELETE。不要添加原文没有的信息。
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
 结构字段规则：
-when 是机器排序字段，只能输出数字日期或数字日期范围，如 2026-06-20、2026-06-20 -> 2026-06-23、2026-06。
-when 绝对不能出现上午、下午、上旬、中旬、下旬、那段时间、离港前后等模糊词。模糊词只能写进正文。
-无法确定数字日期时，when 留空。
+where 不是必填；线上聊天不要默认推断地点。只有原文明确地点或事件强依赖地点时才写。
+${whenRulesText(settings, false)}
+
+关键词规则：
+${keywordRulesText(settings)}
 
 只返回严格 JSON 对象：
 {
@@ -630,10 +709,10 @@ ${JSON.stringify(record, null, 2)}`;
 5. 输出仍然是一条事实记忆，不要写成总结标题或人设归纳。
 
 when 规则：
-1. when 是机器排序字段，只能输出数字日期或数字日期范围。
-2. when 允许格式：2026-06-20、2026-06-20 22:14、2026-06-20 -> 2026-06-23、2026-06。
-3. when 绝对不能出现上午、下午、上旬、中旬、下旬、那段时间、离港前后等模糊词。模糊词只能写进正文。
-4. 无法确定数字日期时，when 留空。
+${whenRulesText(settings, false)}
+
+关键词规则：
+${keywordRulesText(settings)}
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
@@ -662,9 +741,9 @@ ${JSON.stringify(record, null, 2)}`;
     if (!text) return null;
     return {
       text,
-      keywords: unique(item?.keywords || extractKeywordsFromText(text, settings.keywordLimit)).slice(0, settings.keywordLimit),
+      keywords: unique(item?.keywords || extractKeywordsFromText(text, settings.keywordLimit, settings)).slice(0, settings.keywordLimit),
       who: String(item?.who || "").trim(),
-      when: sanitizeWhen(item?.when || ""),
+      when: sanitizeWhen(item?.when || "", settings.utcWhenMode),
       where: String(item?.where || "").trim(),
       how: String(item?.how || "").trim()
     };
@@ -691,11 +770,11 @@ ${JSON.stringify(record, null, 2)}`;
 - 关键词要少而具体，2-5 个。
 
 结构字段规则：
-1. when 是机器排序字段，只能输出数字日期或数字日期范围。
-2. when 允许格式：2026-06、2026-06-01 -> 2026-06-30、2026。
-3. when 绝对不能出现：上午、下午、早晨、中午、晚上、上旬、中旬、下旬、月初、月中、月末、那段时间、后来、离港前后、早期相处、香港最后一天。
-4. 模糊阶段词只能写进 archiveText 正文，不能写进 when。
-5. 如果无法确定数字日期，when 留空。
+where 不是必填；线上聊天不要默认推断地点。只有原文明确地点或阶段强依赖地点时才写。
+${whenRulesText(settings, true)}
+
+关键词规则：
+${keywordRulesText(settings)}
 
 ${extra ? `本次用户新增提示词：\n${extra}\n` : ""}
 
@@ -751,8 +830,8 @@ ${JSON.stringify(records, null, 2)}`;
     return fallbackReviewRecords(records, settings, mode);
   }
 
-  async function askAiForSingleCompress(roche, row, customInstruction = "") {
-    const parsed = await askAi(roche, buildSingleCompressPrompt({ id: row.id, text: row.text }, customInstruction));
+  async function askAiForSingleCompress(roche, row, settings = DEFAULT_SETTINGS, customInstruction = "") {
+    const parsed = await askAi(roche, buildSingleCompressPrompt({ id: row.id, text: row.text }, settings, customInstruction));
     return parsed?.[0] || null;
   }
 
@@ -856,7 +935,7 @@ ${JSON.stringify(records, null, 2)}`;
       reason: manualReasons[0] || reason,
       risk, needsManual,
       who: String(p?.who || "").trim(),
-      when: sanitizeWhen(p?.when || ""),
+      when: sanitizeWhen(p?.when || "", settings.utcWhenMode),
       where: String(p?.where || "").trim(),
       how: String(p?.how || "").trim(),
       type: action === "MERGE_REPLACE" ? "merge" : "fact"
@@ -871,7 +950,7 @@ ${JSON.stringify(records, null, 2)}`;
     if (!sourceIds.length) action = "KEEP";
 
     let archiveText = String(p?.archiveText || p?.newText || p?.what || p?.summaryText || p?.content || p?.text || "").trim();
-    const keywords = unique(p?.keywords || extractKeywordsFromText(archiveText, settings.keywordLimit)).slice(0, settings.keywordLimit);
+    const keywords = unique(p?.keywords || extractKeywordsFromText(archiveText, settings.keywordLimit, settings)).slice(0, settings.keywordLimit);
     let needsManual = false;
     let reason = String(p?.reason || "").trim().slice(0, 40);
 
@@ -891,7 +970,7 @@ ${JSON.stringify(records, null, 2)}`;
       risk: needsManual ? "confirm" : "safe",
       needsManual,
       who: String(p?.who || "").trim(),
-      when: sanitizeWhen(p?.when || ""),
+      when: sanitizeWhen(p?.when || "", settings.utcWhenMode),
       where: String(p?.where || "").trim(),
       how: String(p?.how || "").trim(),
       type: "archive"
@@ -1146,7 +1225,7 @@ ${JSON.stringify(records, null, 2)}`;
             const isKnown = oldHash === hash || hashKnown;
             const isChanged = !!oldHash && oldHash !== hash;
             const isNew = !oldHash && !hashKnown;
-            const when = sanitizeWhen(getFactWhen(item));
+            const when = sanitizeWhen(getFactWhen(item), state.settings.utcWhenMode);
             return {
               id, item, text, hash, oldHash, hashKnown, isKnown, isChanged, isNew, index,
               who: getFactWho(item),
@@ -1393,7 +1472,7 @@ ${JSON.stringify(records, null, 2)}`;
         }
 
         async function updateMemory(id, text, sourceItem = null, overrides = {}) {
-          await roche.memory.update(id, buildMemoryPayload(text, sourceItem, overrides));
+          await roche.memory.update(id, buildMemoryPayload(text, sourceItem, overrides, state.settings));
         }
 
         async function writeMemory(text, sourceItem = null, overrides = {}) {
@@ -1401,7 +1480,7 @@ ${JSON.stringify(records, null, 2)}`;
           return await roche.memory.write({
             conversationId: state.conversationId,
             type: "fact",
-            ...buildMemoryPayload(text, sourceItem, overrides)
+            ...buildMemoryPayload(text, sourceItem, overrides, state.settings)
           });
         }
 
@@ -1838,7 +1917,7 @@ ${JSON.stringify(records, null, 2)}`;
           state.customInstruction = cleanCustomInstruction(root.querySelector("#mtc-custom-instruction")?.value || state.customInstruction || "");
           setBusy(true);
           try {
-            const raw = await askAiForSingleCompress(roche, row, state.customInstruction);
+            const raw = await askAiForSingleCompress(roche, row, state.settings, state.customInstruction);
             const factMap = new Map(currentRows().map(r => [r.id, r]));
             const p = normalizeProposal(raw || { id, action:"COMPRESS", newText: simpleCompressText(row.text, state.settings) }, factMap, state.settings, "compressOnly");
             state.proposals.set(id, p);
@@ -2223,7 +2302,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.5.0</div>
+              <div class="mtc-title">记忆低Token清理器 v3.5.2</div>
             </div>
 
             <div class="mtc-card">
@@ -2312,7 +2391,13 @@ ${JSON.stringify(records, null, 2)}`;
                 <div style="margin-top:8px">
                   ${renderSwitchRow("executeAllAiSuggestions", "全部执行AI建议", state.settings.executeAllAiSuggestions)}
                   ${renderSwitchRow("writeKeywords", "关键词写回主记忆", state.settings.writeKeywords)}
+                  ${renderSwitchRow("utcWhenMode", "UTC时间模式", state.settings.utcWhenMode)}
+                  ${renderSwitchRow("tagEnglishMode", "Tag英文模式", state.settings.tagEnglishMode)}
                   ${renderSwitchRow("showCore", "显示Core Memory", state.settings.showCore)}
+                  <div class="mtc-field-note" style="margin-top:8px;line-height:1.55">
+                    UTC时间模式：只在来源/when 明确带 UTC 时保留 UTC 格式，不会把旧未标注时间强行改成 UTC。<br>
+                    Tag英文模式：AI 生成 keywords 时优先用英文；地点 tag 只在原文明确地点或事件强依赖地点时生成。
+                  </div>
                 </div>
               </details>
 
