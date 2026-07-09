@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.5.5";
+  const VERSION = "3.5.6";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -56,6 +56,17 @@
 
   function charLen(text) {
     return [...String(text || "")].length;
+  }
+
+  function stripKeywordTags(text) {
+    return String(text || "")
+      // 只移除正文末尾的 tag 串；正文内部的 # 不处理。
+      .replace(/\s+(?:#[^#\n]+(?:\s+|$))+$/g, "")
+      .trim();
+  }
+
+  function bodyCharLen(text) {
+    return charLen(stripKeywordTags(text));
   }
 
   function getMemoryId(item) {
@@ -359,8 +370,7 @@
     const parts = t.split(/[。！？.!?\n]/).map(x => x.trim()).filter(Boolean);
     const important = parts.filter(p => IMPORTANT_HINTS.some(k => p.includes(k))).slice(0, 2);
     let out = important.length ? important.join("；") : (parts[0] || t);
-    if (charLen(out) > settings.majorMax) out = [...out].slice(0, settings.majorMax).join("");
-    return out;
+    return out.trim();
   }
 
   function pad2(n) {
@@ -690,9 +700,20 @@
 1. WHAT 只写事件正文，不要重复 who、when、where、how。
 2. 禁止以人物列表、日期、时间范围、主体=、时间=、来源= 这类结构字段开头。
 3. 单日事件通常不要在 WHAT 里重复日期，因为日期已写入 when。
-4. 跨天或多阶段事件可以在 WHAT 里写日期，用来表达推进顺序；但不要写 12:35、03:24、22:58 这类具体钟点。
-5. 如果原文具体时刻只是聊天发生时间，可自然化为中午、下午、晚上、深夜等；如果时刻本身是约定、航班、见面、离开节点，才允许保留具体时刻。
-6. 旧记忆未标注时区时，不把具体钟点写进 WHAT，也不伪装成 UTC。`;
+4. 跨天或多阶段事件可以用次日、随后、后来、最终等相对推进词；不要用日期范围开头，也不要机械列日期。
+5. 不要写 12:35、03:24、22:58 这类具体钟点，除非它本身是约定、航班、见面、离开等必须召回的节点。
+6. 旧记忆未标注时区时，不把具体钟点写进 WHAT，也不伪装成 UTC。
+7. 字数目标只计算事实正文，不包含 keywords/tag。
+8. 字数目标要认真遵守，但必须通过删除弱细节、合并重复表达和缩句达成；禁止为了卡字数输出半句话或漏掉事件结果。`;
+  }
+
+  function compressionTargetText(settings) {
+    return `长度目标：
+- 普通事实正文尽量控制在 ${settings.preferredMin}-${settings.preferredMax} 中文字附近。
+- 重大节点正文可放宽到 ${settings.preferredMax}-${settings.majorMax} 中文字附近。
+- 字数只计算正文，不包含 keywords/tag。
+- 目标长度不是让你截断句子；必须先删弱细节、重复解释、流水账动作，再缩句到目标附近。
+- 如果写不进目标长度，继续删次要细节，不要砍掉事件结尾。`;
   }
 
   function buildReviewerPrompt(records, settings, customInstruction = "", mode = "review") {
@@ -716,10 +737,11 @@ Fact Memory 规则：
 ${whatBodyRulesText()}
 
 压缩规则：
-1. 优先删除分钟级流水账，只保留日期锚、阶段锚、行程锚。
-2. 保留“6月12日下午”“2026-06-23至24日”“香港最后一天”“离港前”“第一次”等有召回意义的时间。
-3. 删除或弱化“04:24、05:06、05:59”这类分钟时间，除非它本身是承诺、行程或离开节点。
-4. 压缩时不要强行短到一句。重大关系节点允许 140-220 中文字。
+${compressionTargetText(settings)}
+1. 先打扫记忆：删除不影响后续召回的弱细节、重复解释、流水账动作和情绪修饰。
+2. 再保留框架：起因、关键动作、结果、关系后果。
+3. 必要细节可以保留：边界、承诺、地点、关键物品、关键称呼、重要时间锚。
+4. 压缩不是裁剪。输出必须是完整句子，不能在事件还没结束时停下。
 5. 如果原文只是多个小互动堆在一起，但属于同一个主题，不要拆得太碎。
 
 SPLIT 拆分规则：
@@ -788,7 +810,15 @@ ${JSON.stringify(records, null, 2)}`;
 
   function buildSingleCompressPrompt(record, settings = DEFAULT_SETTINGS, customInstruction = "") {
     const extra = cleanCustomInstruction(customInstruction);
-    return `用户不想拆分或删除这条事实记忆。请把它改为单条压缩记忆，抹去次要细节，只保留最重要的长期事件轮廓。不要 SPLIT，不要 DELETE。不要添加原文没有的信息。
+    return `用户不想拆分或删除这条事实记忆。请把它改为单条压缩记忆。不要 SPLIT，不要 DELETE。不要添加原文没有的信息。
+
+压缩方法：
+${compressionTargetText(settings)}
+1. 先删除不影响后续召回的次要细节、重复解释和流水账动作。
+2. 保留事件框架：起因、关键动作、结果、关系后果。
+3. 保留必要的边界、承诺、地点、关键物品、关键称呼。
+4. 不要只改几个字，也不要压成冷冰冰的标题式摘要。
+5. 输出必须是完整事实记忆，不能为了卡字数截断句子或漏掉结果。
 
 ${whatBodyRulesText()}
 
@@ -826,12 +856,14 @@ ${JSON.stringify(record, null, 2)}`;
     const extra = cleanCustomInstruction(customInstruction);
     return `请只把当前结果进一步压短，不要重新判断动作，不要拆分，不要删除，不要改成归档。
 
-压缩目标：
-1. 保留事件线、关系后果、边界、承诺、地点、关键物品和关键称呼。
-2. 删除重复铺垫、解释性语句、情绪修饰、分钟级时间、弱细节。
-3. 普通事实目标 70-120 中文字；重大关系节点最多 160 中文字。
-4. 不要添加原文没有的信息。
-5. 输出仍然是一条事实记忆，不要写成总结标题或人设归纳。
+压短目标：
+${compressionTargetText(settings)}
+1. 目标不是同义改写几个字，而是有效压缩：删除弱细节、重复解释、流水账动作和可省略铺垫。
+2. 保留事件框架：起因、关键动作、结果、关系后果。
+3. 保留必要的边界、承诺、地点、关键物品和关键称呼。
+4. 不要压成冷冰冰的标题式摘要，也不要写成人设归纳。
+5. 不要添加原文没有的信息。
+6. 输出必须是完整事实记忆，不能为了卡字数截断句子或漏掉结果。
 
 ${whatBodyRulesText()}
 
@@ -864,7 +896,12 @@ ${JSON.stringify(record, null, 2)}`;
   async function askAiToTighten(roche, record, settings, customInstruction = "") {
     const parsed = await askAi(roche, buildTightenPrompt(record, settings, customInstruction));
     const item = parsed?.[0] || {};
-    const text = String(item?.text || item?.newText || item?.content || "").trim();
+    const text = cleanWhatBody(String(item?.text || item?.newText || item?.content || "").trim(), {
+      who: item?.who,
+      when: item?.when,
+      where: item?.where,
+      how: item?.how
+    });
     if (!text) return null;
     return {
       text,
@@ -895,7 +932,8 @@ ${whatBodyRulesText()}
 
 归档粒度：
 - 阶段归档：允许把同一段时间的多条线合成 1-3 条阶段叙事。
-- 输出每条归档记忆 120-260 中文字。
+- 每条归档记忆正文尽量控制在 120-260 中文字，不包含 keywords/tag。
+- 通过合并重复信息、删除弱细节和缩句接近长度目标；不要截断句子或漏掉阶段结果。
 - 关键词要少而具体，2-5 个。
 
 结构字段规则：
@@ -1069,12 +1107,15 @@ ${JSON.stringify(records, null, 2)}`;
         needsManual = true;
         manualReasons.push("AI未给压缩文本");
       }
-      if (charLen(newText) > settings.majorMax) newText = [...newText].slice(0, settings.majorMax).join("");
-      if (charLen(newText) < 20 && charLen(original) > 80) {
+      if (bodyCharLen(newText) > settings.majorMax) {
+        needsManual = true;
+        manualReasons.push("仍偏长");
+      }
+      if (bodyCharLen(newText) < 20 && bodyCharLen(original) > 80) {
         needsManual = true;
         manualReasons.push("压缩过短");
       }
-      if (charLen(newText) >= charLen(original)) {
+      if (bodyCharLen(newText) >= bodyCharLen(original)) {
         needsManual = true;
         manualReasons.push("未有效压缩");
       }
@@ -1093,9 +1134,13 @@ ${JSON.stringify(records, null, 2)}`;
 
     if (action === "SPLIT") {
       newItems = newItems.slice(0, 3).map(item => {
-        const text = charLen(item.text) > settings.majorMax ? [...item.text].slice(0, settings.majorMax).join("") : item.text;
+        const text = String(item.text || "").trim();
         return { text, keywords: unique(item.keywords).slice(0, settings.keywordLimit) };
       });
+      if (newItems.some(item => bodyCharLen(item.text) > settings.majorMax)) {
+        needsManual = true;
+        manualReasons.push("拆分偏长");
+      }
       if (newItems.length < 2) {
         action = "COMPRESS";
         newText = newText || simpleCompressText(original, settings);
@@ -1120,6 +1165,14 @@ ${JSON.stringify(records, null, 2)}`;
     newText = cleanWhatBody(newText, { who: outWho, when: outWhen, where: outWhere, how: outHow });
     newItems = (newItems || []).map(item => ({ ...item, text: cleanWhatBody(item.text, {}) }));
     keywords = unique(keywords.map(k => normalizeKeyword(k, settings)).filter(Boolean)).slice(0, settings.keywordLimit);
+    if ((action === "COMPRESS" || action === "MERGE_REPLACE") && bodyCharLen(newText) > settings.majorMax && !manualReasons.includes("仍偏长")) {
+      needsManual = true;
+      manualReasons.push("仍偏长");
+    }
+    if (action === "SPLIT" && newItems.some(item => bodyCharLen(item.text) > settings.majorMax) && !manualReasons.includes("拆分偏长")) {
+      needsManual = true;
+      manualReasons.push("拆分偏长");
+    }
 
     return {
       id, sourceIds, action, newText, newItems, keywords,
@@ -2337,6 +2390,11 @@ ${JSON.stringify(records, null, 2)}`;
               return;
             }
 
+            const beforeLen = bodyCharLen(currentText);
+            const afterLen = bodyCharLen(result.text);
+            const weakShorten = beforeLen > 80 && (beforeLen - afterLen) < Math.max(8, Math.round(beforeLen * 0.08));
+            const stillLong = afterLen > state.settings.majorMax;
+
             if (index !== null && p.action === "SPLIT") {
               const idx = Number(index);
               p.newItems[idx] = {
@@ -2350,6 +2408,12 @@ ${JSON.stringify(records, null, 2)}`;
             } else {
               p.newText = result.text;
               p.keywords = result.keywords;
+            }
+
+            if (weakShorten || stillLong) {
+              p.needsManual = true;
+              p.reason = stillLong ? "仍偏长" : "压缩不明显";
+              p.risk = "confirm";
             }
 
             p.who = result.who || p.who;
@@ -2689,7 +2753,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.5.5</div>
+              <div class="mtc-title">记忆低Token清理器 v3.5.6</div>
             </div>
 
             <div class="mtc-card">
