@@ -3,7 +3,7 @@
 
   const PLUGIN_ID = "memory-token-cleaner";
   const APP_ID = "memory-token-cleaner-home";
-  const VERSION = "3.5.4";
+  const VERSION = "3.5.5";
 
   const DEFAULT_SETTINGS = {
     maxChars: 180,
@@ -1244,6 +1244,16 @@ ${JSON.stringify(records, null, 2)}`;
       .roche-plugin-memory-token-cleaner .mtc-fact {
         border:1px solid var(--mtc-border-color); background:var(--mtc-card-bg); border-radius:16px; padding:12px; margin:10px 0;
       }
+        .mtc-fact.merge-selected {
+          border-color: rgba(56, 189, 248, 0.95);
+          background: rgba(56, 189, 248, 0.08);
+          box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.28);
+        }
+        .mtc-merge-select.on .mtc-muted {
+          color: #0369a1;
+          font-weight: 700;
+        }
+
       .roche-plugin-memory-token-cleaner .mtc-row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
       .roche-plugin-memory-token-cleaner .mtc-row select { flex:1; min-width:180px; }
       .roche-plugin-memory-token-cleaner .mtc-muted, .roche-plugin-memory-token-cleaner .mtc-field-note { color:var(--mtc-muted-color); font-size:12px; line-height:1.45; }
@@ -2504,11 +2514,12 @@ ${JSON.stringify(records, null, 2)}`;
 
         function renderMergeSelector(p) {
           const id = escapeHtml(p.id);
-          const checked = state.mergeSelection?.has?.(p.id) ? "checked" : "";
+          const selected = state.mergeSelection?.has?.(p.id);
+          const checked = selected ? "checked" : "";
           return `
-            <label class="mtc-merge-select" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+            <label class="mtc-merge-select ${selected ? "on" : ""}" style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
               <input type="checkbox" data-role="merge-select" data-id="${id}" ${checked}>
-              <span class="mtc-muted">合并选择</span>
+              <span class="mtc-muted">${selected ? "已选合并" : "合并选择"}</span>
             </label>
           `;
         }
@@ -2516,10 +2527,11 @@ ${JSON.stringify(records, null, 2)}`;
         function renderArchiveProposal(p, factMap) {
           const sourceText = (p.sourceIds || []).map(id => factMap.get(id)?.text).filter(Boolean);
           return `
-            <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+            <div class="mtc-fact ${state.mergeSelection?.has?.(p.id) ? "merge-selected" : ""}" data-id="${escapeHtml(p.id)}">
               ${renderMergeSelector(p)}
               <div class="mtc-badges">
                 ${actionBadge(p)}
+                ${state.mergeSelection?.has?.(p.id) ? `<span class="mtc-badge confirm">已选合并</span>` : ""}
                 <span class="mtc-badge">来源 ${p.sourceIds.length} 条</span>
                 ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
               </div>
@@ -2539,10 +2551,11 @@ ${JSON.stringify(records, null, 2)}`;
         function renderMergeProposal(p, factMap) {
           const sourceText = (p.sourceIds || []).map(id => factMap.get(id)?.text).filter(Boolean);
           return `
-            <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+            <div class="mtc-fact ${state.mergeSelection?.has?.(p.id) ? "merge-selected" : ""}" data-id="${escapeHtml(p.id)}">
               ${renderMergeSelector(p)}
               <div class="mtc-badges">
                 ${actionBadge(p)}
+                ${state.mergeSelection?.has?.(p.id) ? `<span class="mtc-badge confirm">已选合并</span>` : ""}
                 <span class="mtc-badge">合并 ${p.sourceIds.length} 条</span>
                 ${p.when ? `<span class="mtc-badge">when: ${escapeHtml(p.when)}</span>` : ""}
                 ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
@@ -2577,10 +2590,11 @@ ${JSON.stringify(records, null, 2)}`;
           `).join("") : "";
 
           return `
-            <div class="mtc-fact" data-id="${escapeHtml(p.id)}">
+            <div class="mtc-fact ${state.mergeSelection?.has?.(p.id) ? "merge-selected" : ""}" data-id="${escapeHtml(p.id)}">
               ${renderMergeSelector(p)}
               <div class="mtc-badges">
                 ${actionBadge(p)}
+                ${state.mergeSelection?.has?.(p.id) ? `<span class="mtc-badge confirm">已选合并</span>` : ""}
                 ${isKeep ? `<span class="mtc-badge">KEEP</span>` : ""}
                 ${p.needsManual ? `<span class="mtc-badge confirm">需处理</span>` : ""}
                 ${p.reason ? `<span class="mtc-badge">${escapeHtml(p.reason)}</span>` : ""}
@@ -2675,7 +2689,7 @@ ${JSON.stringify(records, null, 2)}`;
           root.innerHTML = `
             <div class="mtc-top">
               <button type="button" data-action="back">返回</button>
-              <div class="mtc-title">记忆低Token清理器 v3.5.4</div>
+              <div class="mtc-title">记忆低Token清理器 v3.5.5</div>
             </div>
 
             <div class="mtc-card">
