@@ -1,10 +1,10 @@
 {
   "id": "memory-token-cleaner",
   "name": "记忆低Token清理器",
-  "version": "1.0.0",
+  "version": "3.5.4",
   "description": "清理、压缩并关键词化 Roche 事实记忆，降低长期记忆注入 token。Core Memory 不会被修改。",
   "author": "Ranni & ChatGPT",
-  "entry": "https://raw.githubusercontent.com/EZIO9103/roche-memory-token-cleaner/refs/heads/main/plugin.js",
+  "entry": "https://ezio9103.github.io/roche-memory-token-cleaner/plugin.js",
   "hash": "",
   "permissions": [
     "memory:read",
